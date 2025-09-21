@@ -165,6 +165,20 @@ class CameraController:
         self.target_detector.set_detection_enabled(enabled)
         return True
 
+    def set_debug_mode(self, enabled):
+        """Enable or disable debug visualization mode"""
+        self.target_detector.set_debug_mode(enabled)
+        return True
+
+    def get_debug_frame_jpeg(self):
+        """Get debug frame as JPEG bytes"""
+        # Generate fresh debug frame from current frame if debug mode is on
+        with self.lock:
+            if self.frame is not None and self.target_detector.debug_mode:
+                self.target_detector.generate_debug_frame(self.frame)
+
+        return self.target_detector.get_debug_frame_jpeg()
+
     def capture_image(self):
         """Capture and save current frame"""
         with self.lock:
@@ -212,6 +226,8 @@ class StreamingHandler(BaseHTTPRequestHandler):
 
         if path == '/stream.mjpg':
             self._serve_mjpeg_stream()
+        elif path == '/debug.mjpg':
+            self._serve_debug_stream()
         elif path == '/' or path == '/index.html':
             self._serve_file('camera_interface.html')
         elif path == '/api/status':
@@ -252,6 +268,52 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 time.sleep(0.03)
         except Exception as e:
             print(f"Stream client disconnected: {e}")
+
+    def _serve_debug_stream(self):
+        """Serve MJPEG debug stream showing threshold and contours"""
+        self.send_response(200)
+        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+
+        try:
+            while True:
+                debug_data = camera_controller.get_debug_frame_jpeg()
+                if debug_data and len(debug_data) > 100:  # Valid JPEG should be larger
+                    self.wfile.write(b'--frame\r\n')
+                    self.send_header('Content-Type', 'image/jpeg')
+                    self.send_header('Content-Length', str(len(debug_data)))
+                    self.end_headers()
+                    self.wfile.write(debug_data)
+                    self.wfile.write(b'\r\n')
+                else:
+                    # Create a simple "Debug Mode Disabled" image
+                    import cv2
+                    import numpy as np
+
+                    # Create a simple status image
+                    img = np.zeros((480, 640, 3), dtype=np.uint8)
+                    img.fill(50)  # Dark gray background
+
+                    cv2.putText(img, "DEBUG MODE", (200, 200),
+                               cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 255), 3)
+                    cv2.putText(img, "Enable debug mode in the web interface", (80, 300),
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+                    _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    placeholder = buffer.tobytes()
+
+                    self.wfile.write(b'--frame\r\n')
+                    self.send_header('Content-Type', 'image/jpeg')
+                    self.send_header('Content-Length', str(len(placeholder)))
+                    self.end_headers()
+                    self.wfile.write(placeholder)
+                    self.wfile.write(b'\r\n')
+
+                time.sleep(0.2)  # 5 FPS for debug stream
+        except Exception as e:
+            print(f"Debug stream client disconnected: {e}")
 
     def _serve_file(self, filename):
         """Serve static files"""
@@ -329,6 +391,27 @@ class StreamingHandler(BaseHTTPRequestHandler):
                     response = {'success': True, 'message': f'Target detection {status}'}
                 else:
                     response = {'success': False, 'message': 'Failed to set target detection'}
+
+            elif path == '/api/debug_mode':
+                enabled = data.get('enabled', False)
+                if camera_controller.set_debug_mode(enabled):
+                    status = "enabled" if enabled else "disabled"
+                    response = {'success': True, 'message': f'Debug mode {status}'}
+                else:
+                    response = {'success': False, 'message': 'Failed to set debug mode'}
+
+            elif path == '/api/debug_type':
+                debug_type = data.get('debug_type', 'combined')
+                if camera_controller.target_detector.set_debug_type(debug_type):
+                    response = {'success': True, 'message': f'Debug type set to {debug_type}'}
+                else:
+                    response = {'success': False, 'message': 'Invalid debug type (must be combined, corners, or circles)'}
+
+            elif path == '/api/force_detection':
+                if camera_controller.target_detector.force_detection():
+                    response = {'success': True, 'message': 'Target re-detection forced successfully'}
+                else:
+                    response = {'success': False, 'message': 'Failed to force target re-detection'}
 
             elif path == '/api/capture':
                 filename = camera_controller.capture_image()

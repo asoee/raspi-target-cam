@@ -217,6 +217,39 @@
                 </div>
 
                 <div class="control-group">
+                    <h3>🐛 Debug</h3>
+
+                    <div class="control-row">
+                        <label>Debug Mode:</label>
+                        <select id="debugMode" onchange="toggleDebugMode()" disabled>
+                            <option value="false" selected>Disabled</option>
+                            <option value="true">Enabled</option>
+                        </select>
+                    </div>
+
+                    <div class="control-row">
+                        <label>Debug View:</label>
+                        <select id="debugType" onchange="changeDebugType()" disabled>
+                            <option value="combined" selected>Combined</option>
+                            <option value="corners">Corner Detection</option>
+                            <option value="circles">Circle Detection</option>
+                        </select>
+                    </div>
+
+                    <div class="control-row">
+                        <button onclick="openDebugStream()" disabled id="debugStreamBtn">
+                            🔍 Open Debug Stream
+                        </button>
+                    </div>
+
+                    <div class="control-row">
+                        <button onclick="forceDetection()" disabled id="forceDetectionBtn">
+                            🎯 Force Re-Detection
+                        </button>
+                    </div>
+                </div>
+
+                <div class="control-group">
                     <h3>📷 Capture</h3>
 
                     <div class="control-row">
@@ -273,14 +306,14 @@
         }
 
         function enableControls() {
-            const controls = ['resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'captureBtn', 'recordBtn'];
+            const controls = ['resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'debugMode', 'debugType', 'debugStreamBtn', 'forceDetectionBtn', 'captureBtn', 'recordBtn'];
             controls.forEach(id => {
                 document.getElementById(id).disabled = false;
             });
         }
 
         function disableControls() {
-            const controls = ['resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'captureBtn', 'recordBtn'];
+            const controls = ['resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'debugMode', 'debugType', 'debugStreamBtn', 'forceDetectionBtn', 'captureBtn', 'recordBtn'];
             controls.forEach(id => {
                 document.getElementById(id).disabled = true;
             });
@@ -362,6 +395,57 @@
                 .catch(error => updateStatus(`❌ Target detection error: ${error}`, true));
         }
 
+        function toggleDebugMode() {
+            const enabled = document.getElementById('debugMode').value === 'true';
+            const status = enabled ? 'Enabling' : 'Disabling';
+            updateStatus(`🐛 ${status} debug mode...`, false);
+
+            apiCall('/api/debug_mode', { enabled: enabled })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Debug mode error: ${error}`, true));
+        }
+
+        function openDebugStream() {
+            const debugUrl = '/debug.mjpg';
+            window.open(debugUrl, 'debugStream', 'width=800,height=600,scrollbars=no,resizable=yes');
+            updateStatus("🔍 Debug stream opened in new window", false);
+        }
+
+        function changeDebugType() {
+            const debugType = document.getElementById('debugType').value;
+            updateStatus(`🔍 Changing debug view to ${debugType}...`, false);
+
+            apiCall('/api/debug_type', { debug_type: debugType })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Debug type error: ${error}`, true));
+        }
+
+        function forceDetection() {
+            updateStatus("🎯 Forcing target re-detection...", false);
+
+            apiCall('/api/force_detection', {})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Force detection error: ${error}`, true));
+        }
+
         function captureImage() {
             updateStatus("📸 Capturing image...", false);
 
@@ -441,6 +525,8 @@
                     document.getElementById('panYValue').textContent = status.pan_y;
                     document.getElementById('rotation').value = status.rotation;
                     document.getElementById('targetDetection').value = status.detection_enabled ? 'true' : 'false';
+                    document.getElementById('debugMode').value = status.debug_mode ? 'true' : 'false';
+                    document.getElementById('debugType').value = status.debug_type || 'combined';
 
                     const resSelect = document.getElementById('resolution');
                     const currentRes = `${status.resolution[0]}x${status.resolution[1]}`;
