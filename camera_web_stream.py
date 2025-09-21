@@ -191,6 +191,14 @@ class CameraController:
                 return filename
         return None
 
+    def calibrate_perspective(self):
+        """Perform perspective calibration using current frame"""
+        with self.lock:
+            if self.frame is not None:
+                return self.target_detector.calibrate_perspective(self.frame)
+            else:
+                return False, "No frame available for calibration"
+
     def get_status(self):
         """Get current camera status"""
         status = {
@@ -412,6 +420,24 @@ class StreamingHandler(BaseHTTPRequestHandler):
                     response = {'success': True, 'message': 'Target re-detection forced successfully'}
                 else:
                     response = {'success': False, 'message': 'Failed to force target re-detection'}
+
+            elif path == '/api/calibrate_perspective':
+                success, message = camera_controller.calibrate_perspective()
+                response = {'success': success, 'message': message}
+
+            elif path == '/api/save_calibration':
+                # Get current camera resolution
+                camera_resolution = camera_controller.resolution
+                success, message = camera_controller.target_detector.save_perspective_calibration(camera_resolution)
+                response = {'success': success, 'message': message}
+
+            elif path == '/api/calibration_mode':
+                enabled = data.get('enabled', False)
+                if camera_controller.target_detector.set_calibration_mode(enabled):
+                    status = "enabled" if enabled else "disabled"
+                    response = {'success': True, 'message': f'Calibration mode {status}'}
+                else:
+                    response = {'success': False, 'message': 'Failed to set calibration mode'}
 
             elif path == '/api/capture':
                 filename = camera_controller.capture_image()

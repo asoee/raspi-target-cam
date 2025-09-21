@@ -7,6 +7,8 @@ Detects shooting target circles and bullet holes using OpenCV
 import cv2
 import numpy as np
 import time
+import yaml
+import os
 
 
 class TargetDetector:
@@ -53,6 +55,16 @@ class TargetDetector:
         self.corner_debug_frame = None
         self.circle_debug_frame = None
 
+        # Perspective calibration
+        self.calibration_file = "perspective_calibration.yaml"
+        self.calibration_mode = False  # When true, performs detection on demand
+        self.saved_perspective_matrix = None
+        self.saved_ellipse_data = None
+        self.calibration_resolution = None
+
+        # Load saved calibration on startup
+        self.load_perspective_calibration()
+
     def detect_black_circle_improved(self, frame):
         """
         Improved detection specifically for the large black circle target
@@ -86,9 +98,9 @@ class TargetDetector:
         if self.debug_mode:
             self.circle_debug_frame = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
             cv2.putText(self.circle_debug_frame, "CIRCLE DETECTION DEBUG",
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                       (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
             cv2.putText(self.circle_debug_frame, f"Threshold: 80, Scale: {scale_factor:.1f}",
-                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                       (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
 
         # Find contours in the binary image
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -167,11 +179,11 @@ class TargetDetector:
                 cv2.circle(self.circle_debug_frame, center, radius, (0, 255, 0), 3)
                 cv2.circle(self.circle_debug_frame, center, 5, (0, 0, 255), -1)
                 cv2.putText(self.circle_debug_frame, f"Circle: r={radius}",
-                           (center[0] - 60, center[1] - radius - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                           (center[0] - 80, center[1] - radius - 15),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
 
             cv2.putText(self.circle_debug_frame, f"Contours: {len(contours)}, Best Score: {best_score:.2f}",
-                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                       (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
 
         return best_circle
 
@@ -324,6 +336,176 @@ class TargetDetector:
 
         return False
 
+    def detect_ellipse_perspective(self, frame):
+        """
+        Detect perspective transformation based on outer circle appearing as ellipse
+        Returns transformation matrix to correct perspective distortion
+        """
+        # Convert to grayscale
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = frame.shape[:2]
+
+        # Use edge detection to find the outer ring
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
+
+        # Find contours
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Debug tracking for rejection reasons
+        rejection_reasons = []
+        analyzed_contours = 0
+
+        best_ellipse = None
+        best_score = 0
+
+        # Look for elliptical contours that could be the outer circle
+        for contour in contours:
+            if len(contour) < 5:  # Need at least 5 points to fit ellipse
+                rejection_reasons.append(f"Contour {len(rejection_reasons)+1}: <5 points ({len(contour)})")
+                continue
+
+            area = cv2.contourArea(contour)
+            if area < 1000:  # Skip small contours
+                # Skip logging "too small" contours to reduce clutter
+                continue
+
+            analyzed_contours += 1
+
+            try:
+                # Fit ellipse to contour
+                ellipse = cv2.fitEllipse(contour)
+                (center_x, center_y), (minor_axis, major_axis), angle = ellipse
+
+                # Calculate aspect ratio (how "stretched" the ellipse is)
+                aspect_ratio = max(major_axis, minor_axis) / min(major_axis, minor_axis)
+
+                # Skip if too circular (no perspective) or too elongated (likely noise)
+                if aspect_ratio < 1.02:
+                    rejection_reasons.append(f"Contour {analyzed_contours}: too circular (ratio={aspect_ratio:.2f})")
+                    continue
+                elif aspect_ratio > 4.0:
+                    rejection_reasons.append(f"Contour {analyzed_contours}: too elongated (ratio={aspect_ratio:.2f})")
+                    continue
+
+                # Score based on size and reasonable ellipse properties
+                size_score = area / (w * h)  # Prefer larger ellipses
+                aspect_score = 1.0 / aspect_ratio  # Prefer moderate distortion
+
+                # Check if ellipse is reasonably centered
+                center_score = 1.0 - (abs(center_x - w/2) + abs(center_y - h/2)) / (w + h)
+
+                score = size_score * 0.5 + aspect_score * 0.3 + center_score * 0.2
+
+                if score > best_score:
+                    best_score = score
+                    best_ellipse = ellipse
+                    rejection_reasons.append(f"Contour {analyzed_contours}: ACCEPTED (score={score:.3f}, ratio={aspect_ratio:.2f})")
+                else:
+                    rejection_reasons.append(f"Contour {analyzed_contours}: low score ({score:.3f} vs {best_score:.3f})")
+
+            except cv2.error as e:
+                rejection_reasons.append(f"Contour {analyzed_contours}: ellipse fit failed ({str(e)[:20]})")
+                continue
+
+        # Create debug visualization for ellipse detection
+        if self.debug_mode:
+            self.corner_debug_frame = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+            cv2.putText(self.corner_debug_frame, "ELLIPSE PERSPECTIVE DETECTION",
+                       (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+            cv2.putText(self.corner_debug_frame, f"Edge contours: {len(contours)} (analyzed: {analyzed_contours})",
+                       (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+
+        # Add debug visualization for ellipse detection
+        if self.debug_mode and self.corner_debug_frame is not None:
+            # Draw all significant contours in blue
+            for contour in contours:
+                if cv2.contourArea(contour) > 1000:
+                    cv2.drawContours(self.corner_debug_frame, [contour], -1, (255, 0, 0), 1)
+
+            # Draw the best ellipse in green if found
+            if best_ellipse is not None:
+                cv2.ellipse(self.corner_debug_frame, best_ellipse, (0, 255, 0), 4)
+                (center_x, center_y), (minor_axis, major_axis), angle = best_ellipse
+                aspect_ratio = max(major_axis, minor_axis) / min(major_axis, minor_axis)
+                cv2.putText(self.corner_debug_frame, f"Ellipse: ratio={aspect_ratio:.2f}",
+                           (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+                cv2.putText(self.corner_debug_frame, f"Score: {best_score:.3f}",
+                           (10, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+            else:
+                cv2.putText(self.corner_debug_frame, "No suitable ellipse found",
+                           (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+
+            # Display rejection reasons (show first few)
+            y_offset = 250
+            max_reasons = min(6, len(rejection_reasons))  # Show max 6 reasons (fewer due to larger font)
+            for i in range(max_reasons):
+                reason = rejection_reasons[i]
+                if len(reason) > 45:  # Truncate shorter due to larger font
+                    reason = reason[:42] + "..."
+                color = (0, 255, 0) if "ACCEPTED" in reason else (255, 255, 255)
+                cv2.putText(self.corner_debug_frame, reason,
+                           (10, y_offset + i * 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+            if len(rejection_reasons) > max_reasons:
+                cv2.putText(self.corner_debug_frame, f"... and {len(rejection_reasons) - max_reasons} more",
+                           (10, y_offset + max_reasons * 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 128), 2)
+
+        if best_ellipse is not None:
+            # Calculate perspective transformation from ellipse
+            return self._ellipse_to_perspective_transform(best_ellipse, (w, h))
+
+        return None
+
+    def _ellipse_to_perspective_transform(self, ellipse, frame_size):
+        """
+        Calculate affine transformation matrix from ellipse parameters
+        to correct the perspective so the ellipse becomes a circle
+        """
+        (center_x, center_y), (minor_axis, major_axis), angle = ellipse
+        w, h = frame_size
+
+        # Determine which axis is major/minor and calculate compression
+        if major_axis > minor_axis:
+            compression_ratio = minor_axis / major_axis
+            rotation_angle = angle
+        else:
+            compression_ratio = major_axis / minor_axis
+            rotation_angle = angle + 90
+
+        # Convert angle to radians
+        angle_rad = np.radians(rotation_angle)
+
+        # For affine transformation, we'll use cv2.getRotationMatrix2D and scaling
+        # 1. Create rotation matrix around ellipse center
+        rotation_matrix = cv2.getRotationMatrix2D((center_x, center_y), rotation_angle, 1.0)
+
+        # 2. Create scaling matrix to correct aspect ratio
+        # We need to stretch along the minor axis direction
+        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+
+        # Scale factor to make ellipse circular
+        scale_factor = 1.0 / compression_ratio
+
+        # Create transformation matrix that:
+        # 1. Translates to origin
+        # 2. Rotates to align with axes
+        # 3. Scales to correct aspect ratio
+        # 4. Rotates back
+        # 5. Translates back
+
+        # Simplified approach: create affine matrix directly
+        M = np.array([[1.0, 0.0, 0.0],
+                      [0.0, scale_factor, 0.0]], dtype=np.float32)
+
+        # Apply rotation around center
+        transform_matrix = cv2.getRotationMatrix2D((center_x, center_y), rotation_angle, 1.0)
+
+        # Combine with scaling (this is approximate but should work for moderate perspective)
+        transform_matrix[1, 1] *= scale_factor
+
+        return transform_matrix
+
     def detect_rectangular_target(self, frame):
         """
         Detect the rectangular target paper and find its corners
@@ -369,16 +551,22 @@ class TargetDetector:
 
         # Store debug information
         if self.debug_mode:
-            # Create enhanced corner detection debug visualization
-            self.corner_debug_frame = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+            # Only create corner debug frame if ellipse detection hasn't already created one
+            if self.corner_debug_frame is None:
+                # Create enhanced corner detection debug visualization
+                self.corner_debug_frame = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
 
-            # Always draw basic debug info even if no target found
-            cv2.putText(self.corner_debug_frame, f"Contours found: {len(contours)}",
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(self.corner_debug_frame, "CORNER DETECTION DEBUG",
-                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            cv2.putText(self.corner_debug_frame, "Combined: Adaptive + Canny edges",
-                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                # Always draw basic debug info even if no target found
+                cv2.putText(self.corner_debug_frame, f"Contours found: {len(contours)}",
+                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(self.corner_debug_frame, "CORNER DETECTION DEBUG (FALLBACK)",
+                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                cv2.putText(self.corner_debug_frame, "Combined: Adaptive + Canny edges",
+                           (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            else:
+                # Ellipse detection already created debug frame, just add fallback info
+                cv2.putText(self.corner_debug_frame, "FALLBACK: Corner detection active",
+                           (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
             # Draw all contours in blue
             for contour in contours:
@@ -550,38 +738,80 @@ class TargetDetector:
     def apply_perspective_correction(self, frame, matrix, output_size=(800, 800)):
         """
         Apply perspective correction to frame
+        Handles both affine (2x3) and perspective (3x3) transformation matrices
         """
         if matrix is None:
             return None
 
-        corrected = cv2.warpPerspective(frame, matrix, output_size)
+        # Check matrix dimensions to determine transformation type
+        if matrix.shape == (2, 3):
+            # Affine transformation (from ellipse method)
+            corrected = cv2.warpAffine(frame, matrix, output_size)
+        elif matrix.shape == (3, 3):
+            # Perspective transformation (from corner method)
+            corrected = cv2.warpPerspective(frame, matrix, output_size)
+        else:
+            print(f"Unsupported matrix shape: {matrix.shape}")
+            return None
+
         return corrected
 
     def _transform_coordinates_back(self, circle_data, matrix, original_shape):
         """
         Transform coordinates from perspective-corrected frame back to original frame
+        Handles both affine (2x3) and perspective (3x3) transformation matrices
         """
         if circle_data is None or matrix is None:
             return circle_data
 
         x, y, radius = circle_data
 
-        # Create inverse transformation matrix
-        inv_matrix = np.linalg.inv(matrix)
+        # Handle different matrix types
+        if matrix.shape == (2, 3):
+            # Affine transformation
+            try:
+                # For 2x3 affine matrix, we need to compute the inverse
+                # Add homogeneous row to make it 3x3 for inversion
+                full_matrix = np.vstack([matrix, [0, 0, 1]])
+                inv_matrix = np.linalg.inv(full_matrix)
 
-        # Transform center point back to original coordinates
-        point = np.array([[x, y]], dtype=np.float32).reshape(-1, 1, 2)
-        transformed_point = cv2.perspectiveTransform(point, inv_matrix)
-        new_x, new_y = transformed_point[0][0]
+                # Transform center point
+                point = np.array([x, y, 1])
+                transformed_point = inv_matrix @ point
+                new_x, new_y = transformed_point[0], transformed_point[1]
 
-        # Scale radius approximately (this is an approximation since perspective changes sizes)
-        # Use the determinant of the transformation matrix to estimate scaling
-        scale_factor = np.sqrt(abs(np.linalg.det(matrix)))
-        original_area = original_shape[0] * original_shape[1]
-        corrected_area = self.corrected_target_size[0] * self.corrected_target_size[1]
-        area_ratio = np.sqrt(original_area / corrected_area)
+                # For affine transformation, use simpler radius scaling
+                scale_factor = np.sqrt(abs(np.linalg.det(matrix[:2, :2])))
+                new_radius = radius / scale_factor
 
-        new_radius = radius * area_ratio / scale_factor
+            except np.linalg.LinAlgError:
+                # If inverse fails, return original coordinates
+                return circle_data
+
+        elif matrix.shape == (3, 3):
+            # Perspective transformation
+            try:
+                inv_matrix = np.linalg.inv(matrix)
+
+                # Transform center point back to original coordinates
+                point = np.array([[x, y]], dtype=np.float32).reshape(-1, 1, 2)
+                transformed_point = cv2.perspectiveTransform(point, inv_matrix)
+                new_x, new_y = transformed_point[0][0]
+
+                # Scale radius approximately (this is an approximation since perspective changes sizes)
+                scale_factor = np.sqrt(abs(np.linalg.det(matrix)))
+                original_area = original_shape[0] * original_shape[1]
+                corrected_area = self.corrected_target_size[0] * self.corrected_target_size[1]
+                area_ratio = np.sqrt(original_area / corrected_area)
+
+                new_radius = radius * area_ratio / scale_factor
+
+            except (np.linalg.LinAlgError, cv2.error):
+                # If transformation fails, return original coordinates
+                return circle_data
+        else:
+            # Unsupported matrix type
+            return circle_data
 
         return (int(new_x), int(new_y), int(new_radius))
 
@@ -756,11 +986,36 @@ class TargetDetector:
             # Update detection timestamp
             self.last_detection_time = time.time()
 
-            # First, detect the rectangular target paper for perspective correction
-            corners = self.detect_rectangular_target(frame)
-            if corners is not None:
-                self.target_corners = corners
-                self.perspective_matrix = self.get_perspective_transform(corners, self.corrected_target_size)
+            # Clear debug frames for fresh detection
+            if self.debug_mode:
+                self.corner_debug_frame = None
+                self.circle_debug_frame = None
+
+            # Use saved perspective calibration or detect on demand
+            current_resolution = (frame.shape[1], frame.shape[0])  # (width, height)
+
+            if self.calibration_mode:
+                # In calibration mode - only detect when explicitly requested
+                if self.saved_perspective_matrix is not None:
+                    self.perspective_matrix = self.get_scaled_perspective_matrix(current_resolution)
+                    self.target_corners = None
+                else:
+                    self.perspective_matrix = None
+                    self.target_corners = None
+            else:
+                # Normal mode - use saved calibration if available, otherwise detect
+                if self.saved_perspective_matrix is not None:
+                    self.perspective_matrix = self.get_scaled_perspective_matrix(current_resolution)
+                    self.target_corners = None
+                else:
+                    # Fallback to detection if no saved calibration
+                    ellipse_matrix = self.detect_ellipse_perspective(frame)
+                    if ellipse_matrix is not None:
+                        self.perspective_matrix = ellipse_matrix
+                        self.target_corners = None
+                    else:
+                        self.perspective_matrix = None
+                        self.target_corners = None
 
             # Use perspective-corrected frame for circle detection if available
             detection_frame = frame
@@ -1055,14 +1310,14 @@ class TargetDetector:
         combined_height = h
         self.debug_frame = np.zeros((combined_height, combined_width, 3), dtype=np.uint8)
 
-        # Left side: corner detection
+        # Left side: ellipse detection
         if self.corner_debug_frame is not None:
             resized_corner = cv2.resize(self.corner_debug_frame, (w, h))
             self.debug_frame[:h, :w] = resized_corner
         else:
             # Fill with gray and add text
-            cv2.putText(self.debug_frame, "Corner Detection Not Available",
-                       (10, h//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (128, 128, 128), 2)
+            cv2.putText(self.debug_frame, "Ellipse Detection Not Available",
+                       (10, h//2), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (128, 128, 128), 3)
 
         # Right side: circle detection
         if self.circle_debug_frame is not None:
@@ -1071,13 +1326,13 @@ class TargetDetector:
         else:
             # Fill with gray and add text
             cv2.putText(self.debug_frame, "Circle Detection Not Available",
-                       (w + 10, h//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (128, 128, 128), 2)
+                       (w + 10, h//2), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (128, 128, 128), 3)
 
-        # Add labels
-        cv2.putText(self.debug_frame, "CORNER DETECTION", (10, 25),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
-        cv2.putText(self.debug_frame, "CIRCLE DETECTION", (w + 10, 25),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+        # Add labels with larger fonts
+        cv2.putText(self.debug_frame, "ELLIPSE DETECTION", (10, 40),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
+        cv2.putText(self.debug_frame, "CIRCLE DETECTION", (w + 10, 40),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
 
         # Add separator line
         cv2.line(self.debug_frame, (w, 0), (w, h), (255, 255, 255), 2)
@@ -1102,5 +1357,123 @@ class TargetDetector:
             'target_corners': self.target_corners.tolist() if self.target_corners is not None else None,
             'perspective_correction_enabled': self.perspective_matrix is not None,
             'debug_mode': self.debug_mode,
-            'debug_type': self.debug_type
+            'debug_type': self.debug_type,
+            'calibration_mode': self.calibration_mode,
+            'has_saved_calibration': self.saved_perspective_matrix is not None,
+            'calibration_resolution': self.calibration_resolution
         }
+
+    def save_perspective_calibration(self, camera_resolution=None):
+        """Save current perspective calibration to YAML file"""
+        if self.perspective_matrix is None:
+            return False, "No perspective calibration to save"
+
+        try:
+            # Prepare calibration data
+            calibration_data = {
+                'timestamp': time.time(),
+                'perspective_matrix': self.perspective_matrix.tolist(),
+                'ellipse_data': self.saved_ellipse_data,
+                'corrected_target_size': list(self.corrected_target_size),
+                'camera_resolution': list(camera_resolution) if camera_resolution else None,
+                'notes': 'Perspective calibration for fixed camera installation'
+            }
+
+            # Save to YAML file
+            with open(self.calibration_file, 'w') as f:
+                yaml.dump(calibration_data, f, default_flow_style=False)
+
+            print(f"Perspective calibration saved to {self.calibration_file}")
+            return True, f"Calibration saved successfully"
+
+        except Exception as e:
+            error_msg = f"Failed to save calibration: {str(e)}"
+            print(error_msg)
+            return False, error_msg
+
+    def load_perspective_calibration(self):
+        """Load perspective calibration from YAML file"""
+        if not os.path.exists(self.calibration_file):
+            print(f"No calibration file found at {self.calibration_file}")
+            return False, "No calibration file found"
+
+        try:
+            with open(self.calibration_file, 'r') as f:
+                calibration_data = yaml.safe_load(f)
+
+            # Load perspective matrix and resolution
+            if 'perspective_matrix' in calibration_data:
+                self.saved_perspective_matrix = np.array(calibration_data['perspective_matrix'], dtype=np.float32)
+                self.calibration_resolution = calibration_data.get('camera_resolution', None)
+                self.perspective_matrix = self.saved_perspective_matrix.copy()
+
+            # Load ellipse data
+            if 'ellipse_data' in calibration_data:
+                self.saved_ellipse_data = calibration_data['ellipse_data']
+
+            # Load target size
+            if 'corrected_target_size' in calibration_data:
+                self.corrected_target_size = tuple(calibration_data['corrected_target_size'])
+
+            timestamp = calibration_data.get('timestamp', 0)
+            age_hours = (time.time() - timestamp) / 3600
+
+            print(f"Perspective calibration loaded from {self.calibration_file} (age: {age_hours:.1f} hours)")
+            return True, f"Calibration loaded successfully (age: {age_hours:.1f}h)"
+
+        except Exception as e:
+            error_msg = f"Failed to load calibration: {str(e)}"
+            print(error_msg)
+            return False, error_msg
+
+    def calibrate_perspective(self, frame):
+        """Perform on-demand perspective calibration"""
+        # Store the ellipse data when calibration succeeds
+        ellipse_matrix = self.detect_ellipse_perspective(frame)
+        if ellipse_matrix is not None:
+            self.perspective_matrix = ellipse_matrix
+            # Store ellipse data from the debug info if available
+            self.saved_ellipse_data = {
+                'detection_method': 'ellipse',
+                'calibration_timestamp': time.time()
+            }
+            return True, "Perspective calibration successful"
+        else:
+            return False, "No suitable ellipse found for calibration"
+
+    def set_calibration_mode(self, enabled):
+        """Enable or disable calibration mode"""
+        self.calibration_mode = enabled
+        return True
+
+    def get_scaled_perspective_matrix(self, current_resolution):
+        """Get perspective matrix scaled for current resolution"""
+        if (self.saved_perspective_matrix is None or
+            self.calibration_resolution is None or
+            current_resolution is None):
+            return self.saved_perspective_matrix
+
+        # Calculate scaling factors
+        cal_width, cal_height = self.calibration_resolution
+        cur_width, cur_height = current_resolution
+
+        scale_x = cur_width / cal_width
+        scale_y = cur_height / cal_height
+
+        # Scale the perspective matrix
+        scaled_matrix = self.saved_perspective_matrix.copy()
+
+        if scaled_matrix.shape == (2, 3):
+            # Affine transformation matrix
+            scaled_matrix[0, 0] *= scale_x  # Scale x-direction transform
+            scaled_matrix[0, 2] *= scale_x  # Scale x translation
+            scaled_matrix[1, 1] *= scale_y  # Scale y-direction transform
+            scaled_matrix[1, 2] *= scale_y  # Scale y translation
+        elif scaled_matrix.shape == (3, 3):
+            # Perspective transformation matrix
+            scaled_matrix[0, 0] *= scale_x
+            scaled_matrix[0, 2] *= scale_x
+            scaled_matrix[1, 1] *= scale_y
+            scaled_matrix[1, 2] *= scale_y
+
+        return scaled_matrix

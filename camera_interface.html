@@ -250,6 +250,30 @@
                 </div>
 
                 <div class="control-group">
+                    <h3>🔧 Perspective Calibration</h3>
+
+                    <div class="control-row">
+                        <label>Calibration Mode:</label>
+                        <select id="calibrationMode" onchange="toggleCalibrationMode()" disabled>
+                            <option value="false" selected>Normal</option>
+                            <option value="true">Calibration</option>
+                        </select>
+                    </div>
+
+                    <div class="control-row">
+                        <button onclick="calibratePerspective()" disabled id="calibrateBtn">
+                            🎯 Calibrate Now
+                        </button>
+                    </div>
+
+                    <div class="control-row">
+                        <button onclick="saveCalibration()" disabled id="saveCalibrationBtn">
+                            💾 Save Calibration
+                        </button>
+                    </div>
+                </div>
+
+                <div class="control-group">
                     <h3>📷 Capture</h3>
 
                     <div class="control-row">
@@ -306,14 +330,14 @@
         }
 
         function enableControls() {
-            const controls = ['resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'debugMode', 'debugType', 'debugStreamBtn', 'forceDetectionBtn', 'captureBtn', 'recordBtn'];
+            const controls = ['resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'debugMode', 'debugType', 'debugStreamBtn', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn'];
             controls.forEach(id => {
                 document.getElementById(id).disabled = false;
             });
         }
 
         function disableControls() {
-            const controls = ['resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'debugMode', 'debugType', 'debugStreamBtn', 'forceDetectionBtn', 'captureBtn', 'recordBtn'];
+            const controls = ['resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'debugMode', 'debugType', 'debugStreamBtn', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn'];
             controls.forEach(id => {
                 document.getElementById(id).disabled = true;
             });
@@ -446,6 +470,50 @@
                 .catch(error => updateStatus(`❌ Force detection error: ${error}`, true));
         }
 
+        function toggleCalibrationMode() {
+            const enabled = document.getElementById('calibrationMode').value === 'true';
+            const status = enabled ? 'Enabling' : 'Disabling';
+            updateStatus(`🔧 ${status} calibration mode...`, false);
+
+            apiCall('/api/calibration_mode', { enabled: enabled })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Calibration mode error: ${error}`, true));
+        }
+
+        function calibratePerspective() {
+            updateStatus("🎯 Performing perspective calibration...", false);
+
+            apiCall('/api/calibrate_perspective', {})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Calibration error: ${error}`, true));
+        }
+
+        function saveCalibration() {
+            updateStatus("💾 Saving perspective calibration...", false);
+
+            apiCall('/api/save_calibration', {})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Save calibration error: ${error}`, true));
+        }
+
         function captureImage() {
             updateStatus("📸 Capturing image...", false);
 
@@ -527,6 +595,7 @@
                     document.getElementById('targetDetection').value = status.detection_enabled ? 'true' : 'false';
                     document.getElementById('debugMode').value = status.debug_mode ? 'true' : 'false';
                     document.getElementById('debugType').value = status.debug_type || 'combined';
+                    document.getElementById('calibrationMode').value = status.calibration_mode ? 'true' : 'false';
 
                     const resSelect = document.getElementById('resolution');
                     const currentRes = `${status.resolution[0]}x${status.resolution[1]}`;
