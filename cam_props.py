@@ -38,6 +38,10 @@ def real_time_demo(cap):
     """
     Demonstrates real-time properties while playing the video/camera feed.
     """
+    w,h = 3264, 2448
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+
     print("\nReal-Time Video Properties Demonstration (Press 'q' to exit):")
     while cap.isOpened():
         ret, frame = cap.read()
@@ -49,6 +53,8 @@ def real_time_demo(cap):
         current_time = cap.get(cv2.CAP_PROP_POS_MSEC)
         current_frame = cap.get(cv2.CAP_PROP_POS_FRAMES)
         total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        
+        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
         # Show the video frame
         cv2.imshow("Video", frame)
@@ -84,7 +90,7 @@ def unsupported_properties_section():
 # Main script
 if __name__ == "__main__":
     # Video source (0 for webcam, or provide a video file path)
-    video_source = 1  # Replace with 'sample_video.mp4' for video file
+    video_source = 0  # Replace with 'sample_video.mp4' for video file
     cap = cv2.VideoCapture(video_source)
 
     if not cap.isOpened():

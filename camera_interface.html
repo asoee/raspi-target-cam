@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raspberry Pi Camera Stream</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background-color: #2c3e50;
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 2em;
+        }
+
+        .main-content {
+            display: flex;
+            min-height: 600px;
+        }
+
+        .video-container {
+            flex: 2;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .video-stream {
+            border: 2px solid #34495e;
+            border-radius: 8px;
+            max-width: 100%;
+            height: auto;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        .controls-panel {
+            flex: 1;
+            background-color: #ecf0f1;
+            padding: 20px;
+            border-left: 1px solid #bdc3c7;
+        }
+
+        .control-group {
+            margin-bottom: 25px;
+            padding: 15px;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .control-group h3 {
+            margin: 0 0 15px 0;
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 5px;
+        }
+
+        .control-row {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .control-row label {
+            flex: 1;
+            font-weight: bold;
+            color: #555;
+        }
+
+        .control-row input, .control-row select, .control-row button {
+            flex: 1;
+            margin-left: 10px;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        button:hover {
+            background-color: #2980b9;
+        }
+
+        button:disabled {
+            background-color: #95a5a6;
+            cursor: not-allowed;
+        }
+
+        .status {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #d5f4e6;
+            border: 1px solid #27ae60;
+            border-radius: 4px;
+            color: #27ae60;
+            text-align: center;
+        }
+
+        .error {
+            background-color: #fadbd8;
+            border-color: #e74c3c;
+            color: #e74c3c;
+        }
+
+        @media (max-width: 768px) {
+            .main-content {
+                flex-direction: column;
+            }
+
+            .controls-panel {
+                border-left: none;
+                border-top: 1px solid #bdc3c7;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎯 Raspberry Pi Target Camera</h1>
+            <p>Live camera stream with controls</p>
+        </div>
+
+        <div class="main-content">
+            <div class="video-container">
+                <img id="videoStream"
+                     class="video-stream"
+                     src="/stream.mjpg"
+                     alt="Camera Stream"
+                     onerror="handleStreamError()"
+                     onload="handleStreamLoad()">
+
+                <div id="streamStatus" class="status">
+                    Connecting to camera stream...
+                </div>
+            </div>
+
+            <div class="controls-panel">
+                <div class="control-group">
+                    <h3>🔧 Camera Controls</h3>
+
+                    <div class="control-row">
+                        <label>Resolution:</label>
+                        <select id="resolution" onchange="changeResolution()" disabled>
+                            <option value="640x480">640 x 480 (30fps)</option>
+                            <option value="1024x768">1024 x 768 (30fps)</option>
+                            <option value="1280x960">1280 x 960 (20fps)</option>
+                            <option value="1600x1200">1600 x 1200 (20fps)</option>
+                            <option value="2048x1536">2048 x 1536 (20fps)</option>
+                            <option value="2592x1944" selected>2592 x 1944 (15fps)</option>
+                            <option value="3200x2400">3200 x 2400 (20fps)</option>
+                            <option value="3264x2448">3264 x 2448 (15fps)</option>
+                        </select>
+                    </div>
+
+                    <div class="control-row">
+                        <label>Zoom:</label>
+                        <input type="range" id="zoom" min="1" max="5" step="0.1" value="1" onchange="adjustZoom()" disabled>
+                        <span id="zoomValue">1.0x</span>
+                    </div>
+
+                    <div class="control-row">
+                        <label>Pan X:</label>
+                        <input type="range" id="panX" min="-100" max="100" value="0" onchange="adjustPan()" disabled>
+                        <span id="panXValue">0</span>
+                    </div>
+
+                    <div class="control-row">
+                        <label>Pan Y:</label>
+                        <input type="range" id="panY" min="-100" max="100" value="0" onchange="adjustPan()" disabled>
+                        <span id="panYValue">0</span>
+                    </div>
+
+                    <div class="control-row">
+                        <label>Rotation:</label>
+                        <select id="rotation" onchange="changeRotation()" disabled>
+                            <option value="0">0° (Normal)</option>
+                            <option value="90" selected>90° (Clockwise)</option>
+                            <option value="180">180° (Upside Down)</option>
+                            <option value="270">270° (Counter-Clockwise)</option>
+                        </select>
+                    </div>
+                    <div class="control-row">
+                        <label>Target Detection:</label>
+                        <select id="targetDetection" onchange="toggleTargetDetection()" disabled>
+                            <option value="true" selected>Enabled</option>
+                            <option value="false">Disabled</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>📷 Capture</h3>
+
+                    <div class="control-row">
+                        <button onclick="captureImage()" disabled id="captureBtn">
+                            📸 Capture Image
+                        </button>
+                    </div>
+
+                    <div class="control-row">
+                        <button onclick="toggleRecording()" disabled id="recordBtn">
+                            🔴 Start Recording
+                        </button>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>ℹ️ Stream Info</h3>
+
+                    <div class="control-row">
+                        <label>Stream URL:</label>
+                        <input type="text" id="streamUrl" value="/stream.mjpg" readonly>
+                    </div>
+
+                    <div class="control-row">
+                        <button onclick="refreshStream()">
+                            🔄 Refresh Stream
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let streamConnected = false;
+        let recording = false;
+
+        function handleStreamLoad() {
+            streamConnected = true;
+            updateStatus("✅ Camera stream connected", false);
+            enableControls();
+        }
+
+        function handleStreamError() {
+            streamConnected = false;
+            updateStatus("❌ Camera stream error - Check if camera_web_stream.py is running", true);
+            disableControls();
+        }
+
+        function updateStatus(message, isError) {
+            const status = document.getElementById('streamStatus');
+            status.textContent = message;
+            status.className = isError ? 'status error' : 'status';
+        }
+
+        function enableControls() {
+            const controls = ['resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'captureBtn', 'recordBtn'];
+            controls.forEach(id => {
+                document.getElementById(id).disabled = false;
+            });
+        }
+
+        function disableControls() {
+            const controls = ['resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'captureBtn', 'recordBtn'];
+            controls.forEach(id => {
+                document.getElementById(id).disabled = true;
+            });
+        }
+
+        function changeResolution() {
+            const resolution = document.getElementById('resolution').value;
+            updateStatus(`🔄 Changing resolution to ${resolution}...`, false);
+
+            const [width, height] = resolution.split('x').map(Number);
+            apiCall('/api/resolution', { width, height })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        setTimeout(refreshStream, 1000);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Error: ${error}`, true));
+        }
+
+        function adjustZoom() {
+            const zoom = document.getElementById('zoom').value;
+            document.getElementById('zoomValue').textContent = zoom + 'x';
+
+            apiCall('/api/zoom', { zoom: parseFloat(zoom) })
+                .then(response => {
+                    if (!response.success) {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => console.error('Zoom error:', error));
+        }
+
+        function adjustPan() {
+            const panX = document.getElementById('panX').value;
+            const panY = document.getElementById('panY').value;
+            document.getElementById('panXValue').textContent = panX;
+            document.getElementById('panYValue').textContent = panY;
+
+            apiCall('/api/pan', { pan_x: parseInt(panX), pan_y: parseInt(panY) })
+                .then(response => {
+                    if (!response.success) {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => console.error('Pan error:', error));
+        }
+
+        function changeRotation() {
+            const rotation = document.getElementById('rotation').value;
+            updateStatus(`🔄 Changing rotation to ${rotation}°...`, false);
+
+            apiCall('/api/rotation', { rotation: parseInt(rotation) })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Rotation error: ${error}`, true));
+        }
+
+        function toggleTargetDetection() {
+            const enabled = document.getElementById('targetDetection').value === 'true';
+            const status = enabled ? 'Enabling' : 'Disabling';
+            updateStatus(`🎯 ${status} target detection...`, false);
+
+            apiCall('/api/target_detection', { enabled: enabled })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Target detection error: ${error}`, true));
+        }
+
+        function captureImage() {
+            updateStatus("📸 Capturing image...", false);
+
+            apiCall('/api/capture', {})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Capture error: ${error}`, true));
+        }
+
+        function toggleRecording() {
+            const btn = document.getElementById('recordBtn');
+            recording = !recording;
+
+            if (recording) {
+                btn.textContent = '⏹️ Stop Recording';
+                updateStatus("🔴 Recording started...", false);
+            } else {
+                btn.textContent = '🔴 Start Recording';
+                updateStatus("⏹️ Recording stopped", false);
+            }
+
+            // TODO: Implement recording API call
+            console.log('Recording toggle requested:', recording);
+        }
+
+        function refreshStream() {
+            updateStatus("🔄 Refreshing stream...", false);
+            const img = document.getElementById('videoStream');
+            const currentSrc = img.src;
+            img.src = '';
+            setTimeout(() => {
+                img.src = currentSrc + '?t=' + new Date().getTime();
+            }, 100);
+        }
+
+        // Initialize on page load
+        window.addEventListener('load', function() {
+            // Load current camera status
+            loadCameraStatus();
+
+            // Set initial status
+            setTimeout(() => {
+                if (!streamConnected) {
+                    handleStreamError();
+                }
+            }, 3000);
+        });
+
+        // API call helper function
+        async function apiCall(endpoint, data) {
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(data)
+            });
+            return await response.json();
+        }
+
+        // Load camera status on page load
+        function loadCameraStatus() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(status => {
+                    // Update UI with current camera settings
+                    document.getElementById('zoom').value = status.zoom;
+                    document.getElementById('zoomValue').textContent = status.zoom + 'x';
+                    document.getElementById('panX').value = status.pan_x;
+                    document.getElementById('panXValue').textContent = status.pan_x;
+                    document.getElementById('panY').value = status.pan_y;
+                    document.getElementById('panYValue').textContent = status.pan_y;
+                    document.getElementById('rotation').value = status.rotation;
+                    document.getElementById('targetDetection').value = status.detection_enabled ? 'true' : 'false';
+
+                    const resSelect = document.getElementById('resolution');
+                    const currentRes = `${status.resolution[0]}x${status.resolution[1]}`;
+                    if ([...resSelect.options].some(opt => opt.value === currentRes)) {
+                        resSelect.value = currentRes;
+                    }
+                })
+                .catch(error => console.error('Failed to load status:', error));
+        }
+
+        // Auto-refresh stream every 30 seconds to prevent timeout
+        setInterval(() => {
+            if (streamConnected) {
+                console.log('Auto-refreshing stream...');
+                const img = document.getElementById('videoStream');
+                img.src = img.src.split('?')[0] + '?t=' + new Date().getTime();
+            }
+        }, 30000);
+    </script>
+</body>
+</html>

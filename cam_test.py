@@ -1,9 +1,12 @@
 import cv2 as cv
 import numpy as np
-from skimage.metrics import structural_similarity
 
-cap = cv.VideoCapture(1,cv.CAP_DSHOW)
+cap = cv.VideoCapture(0)
 cap.set()
+w,h = 3264, 2448
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+
 
 
 i = 0
