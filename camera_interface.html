@@ -256,6 +256,38 @@
                     </div>
                 </div>
 
+                <div class="control-group" id="playbackControls" style="display: none;">
+                    <h3>▶️ Playback Controls</h3>
+
+                    <div class="control-row">
+                        <label>Playback Status:</label>
+                        <span id="playbackStatus">N/A</span>
+                    </div>
+
+                    <div class="control-row">
+                        <label>Frame Position:</label>
+                        <span id="framePosition">N/A</span>
+                    </div>
+
+                    <div class="control-row">
+                        <button onclick="pausePlayback()" id="pauseBtn" disabled>
+                            ⏸️ Pause
+                        </button>
+                        <button onclick="resumePlayback()" id="resumeBtn" disabled>
+                            ▶️ Resume
+                        </button>
+                    </div>
+
+                    <div class="control-row">
+                        <button onclick="stepBackward()" id="stepBackBtn" disabled>
+                            ⏮️ Step Back
+                        </button>
+                        <button onclick="stepForward()" id="stepForwardBtn" disabled>
+                            ⏭️ Step Forward
+                        </button>
+                    </div>
+                </div>
+
                 <div class="control-group">
                     <h3>🐛 Debug</h3>
 
@@ -778,6 +810,114 @@
             console.log('Recording toggle requested:', recording);
         }
 
+        function pausePlayback() {
+            updateStatus("⏸️ Pausing video playback...", false);
+
+            apiCall('/api/playback_pause', {})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        updatePlaybackControls();
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Pause error: ${error}`, true));
+        }
+
+        function resumePlayback() {
+            updateStatus("▶️ Resuming video playback...", false);
+
+            apiCall('/api/playback_resume', {})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        updatePlaybackControls();
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Resume error: ${error}`, true));
+        }
+
+        function stepForward() {
+            updateStatus("⏭️ Stepping forward one frame...", false);
+
+            apiCall('/api/playback_step_forward', {})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        updatePlaybackControls();
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Step forward error: ${error}`, true));
+        }
+
+        function stepBackward() {
+            updateStatus("⏮️ Stepping backward one frame...", false);
+
+            apiCall('/api/playback_step_backward', {})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        updatePlaybackControls();
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Step backward error: ${error}`, true));
+        }
+
+        function updatePlaybackControls() {
+            // Fetch current playback info and update UI
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(status => {
+                    updatePlaybackUI(status);
+                })
+                .catch(error => console.error('Failed to update playback controls:', error));
+        }
+
+        function updatePlaybackUI(status) {
+            const playbackControlsDiv = document.getElementById('playbackControls');
+            const playbackStatus = document.getElementById('playbackStatus');
+            const framePosition = document.getElementById('framePosition');
+            const pauseBtn = document.getElementById('pauseBtn');
+            const resumeBtn = document.getElementById('resumeBtn');
+            const stepBackBtn = document.getElementById('stepBackBtn');
+            const stepForwardBtn = document.getElementById('stepForwardBtn');
+
+            if (status.supports_playback_controls) {
+                playbackControlsDiv.style.display = 'block';
+
+                // Update status display
+                if (status.paused) {
+                    playbackStatus.textContent = '⏸️ Paused';
+                    playbackStatus.style.color = '#e67e22'; // Orange
+                } else {
+                    playbackStatus.textContent = '▶️ Playing';
+                    playbackStatus.style.color = '#27ae60'; // Green
+                }
+
+                // Update frame position
+                if (status.total_frames > 0) {
+                    framePosition.textContent = `${status.current_frame} / ${status.total_frames}`;
+                } else {
+                    framePosition.textContent = 'Unknown';
+                }
+
+                // Update button states
+                pauseBtn.disabled = status.paused;
+                resumeBtn.disabled = !status.paused;
+                stepBackBtn.disabled = !status.paused || !status.can_step_backward;
+                stepForwardBtn.disabled = !status.paused || !status.can_step_forward;
+            } else {
+                playbackControlsDiv.style.display = 'none';
+            }
+        }
+
         function refreshStream() {
             updateStatus("🔄 Refreshing stream...", false);
             const img = document.getElementById('videoStream');
@@ -915,6 +1055,9 @@
 
                     // Update stream info display
                     updateStreamInfo(status);
+
+                    // Update playback controls
+                    updatePlaybackUI(status);
                 })
                 .catch(error => console.error('Failed to load status:', error));
         }
@@ -927,6 +1070,20 @@
                 img.src = img.src.split('?')[0] + '?t=' + new Date().getTime();
             }
         }, 30000);
+
+        // Update playback controls every 2 seconds when video is active
+        setInterval(() => {
+            if (streamConnected) {
+                fetch('/api/status')
+                    .then(response => response.json())
+                    .then(status => {
+                        if (status.supports_playback_controls) {
+                            updatePlaybackUI(status);
+                        }
+                    })
+                    .catch(error => console.error('Failed to update playback status:', error));
+            }
+        }, 2000);
     </script>
 </body>
 </html>

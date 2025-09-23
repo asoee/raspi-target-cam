@@ -1,0 +1,18 @@
+camera_resolution:
+- 2592
+- 1944
+corrected_target_size:
+- 800
+- 800
+ellipse_data:
+  calibration_timestamp: 1758559398.687455
+  detection_method: ellipse
+notes: Perspective calibration for fixed camera installation
+perspective_matrix:
+- - 0.06058669090270996
+  - 0.9704933762550354
+  - -188.184814453125
+- - -0.9704933762550354
+  - 0.6245629191398621
+  - 6554.25
+timestamp: 1758559409.529268

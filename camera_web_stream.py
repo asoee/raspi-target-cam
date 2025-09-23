@@ -46,6 +46,20 @@ class CameraController:
         self.native_video_resolution = None  # Native resolution of video file
         self.native_video_fps = None  # Native FPS of video file
 
+        # Playback controls
+        self.paused = False
+        self.step_frame = False  # Flag to advance one frame when paused
+        self.step_direction = 1  # 1 for forward, -1 for backward
+        self.current_frame_number = 0
+        self.display_frame_number = 0  # Frame number to display (doesn't advance when stepping back)
+        self.total_frames = 0
+
+        # Frame buffer for pause functionality (50 frames total: 25 before + 25 after pause point)
+        self.frame_buffer = []
+        self.buffer_size = 50
+        self.pause_buffer_index = 25  # Index in buffer where we paused (25 frames back from pause point)
+        self.pause_frame_number = 0  # Frame number when we paused
+
         # Target detection
         self.target_detector = TargetDetector()
 
@@ -76,6 +90,7 @@ class CameraController:
                 fps = self.cap.get(cv2.CAP_PROP_FPS)
                 width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
                 if fps > 0:
                     self.video_fps = fps
@@ -87,7 +102,12 @@ class CameraController:
                     # Override resolution for video files to match native resolution
                     self.resolution = (width, height)
 
-                print(f"Video properties: {width}x{height} @ {fps:.1f} FPS")
+                if frame_count > 0:
+                    self.total_frames = frame_count
+                    self.current_frame_number = 0
+                    self.display_frame_number = 0
+
+                print(f"Video properties: {width}x{height} @ {fps:.1f} FPS, {frame_count} frames")
 
             self.running = True
             threading.Thread(target=self._capture_loop, daemon=True).start()
@@ -99,10 +119,40 @@ class CameraController:
     def _capture_loop(self):
         """Continuous frame capture and processing loop"""
         while self.running:
+            # Handle pause/play logic
+            if self.paused and not self.step_frame:
+                # When paused and not stepping, serve frames from buffer
+                if self.frame_buffer and self.pause_buffer_index < len(self.frame_buffer):
+                    buffered_frame = self.frame_buffer[self.pause_buffer_index]
+                    with self.lock:
+                        self.frame = buffered_frame.copy()
+                time.sleep(0.1)  # Sleep while paused
+                continue
+
+            # Read new frame from source
             ret, frame = self.cap.read()
             if ret:
+                # Update current frame number for video files
+                if self.source_type == "video":
+                    self.current_frame_number = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+
                 # Apply zoom and pan transformations
                 processed_frame = self._apply_transformations(frame)
+
+                # Add to frame buffer (maintain rolling buffer)
+                self.frame_buffer.append(processed_frame.copy())
+                if len(self.frame_buffer) > self.buffer_size:
+                    self.frame_buffer.pop(0)
+
+                # Handle stepping
+                if self.step_frame:
+                    self.step_frame = False
+                    if self.paused and self._handle_frame_step():
+                        continue
+
+                # Update display frame number for normal playback
+                if not self.paused and self.source_type == "video":
+                    self.display_frame_number = self.current_frame_number
 
                 with self.lock:
                     self.frame = processed_frame.copy()
@@ -110,13 +160,46 @@ class CameraController:
                 # If video file reached end, loop back to beginning
                 if self.source_type == "video":
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    self.current_frame_number = 0
+                    self.display_frame_number = 0
                     continue
 
             # Use appropriate sleep timing
-            if self.source_type == "video":
+            if self.source_type == "video" and not self.paused:
                 time.sleep(self.video_frame_time)
             else:
                 time.sleep(0.03)  # ~30 FPS for camera
+
+    def _handle_frame_step(self):
+        """
+        Handle frame stepping when paused.
+        Returns True if a frame was stepped and should continue, False otherwise.
+        """
+        if not self.frame_buffer:
+            return False
+
+        old_index = self.pause_buffer_index
+        new_index = self.pause_buffer_index + self.step_direction
+
+        # Check boundaries
+        if new_index < 0 or new_index >= len(self.frame_buffer):
+            return False
+
+        # Update buffer index
+        self.pause_buffer_index = new_index
+
+        # Update display frame number based on actual movement in buffer
+        if self.pause_buffer_index != old_index:
+            self.display_frame_number += self.step_direction
+            # Ensure we don't go below 0 or above total frames
+            self.display_frame_number = max(0, min(self.total_frames, self.display_frame_number))
+
+        # Get the buffered frame and update display
+        buffered_frame = self.frame_buffer[self.pause_buffer_index]
+        with self.lock:
+            self.frame = buffered_frame.copy()
+
+        return True
 
     def _apply_transformations(self, frame):
         """Apply rotation, zoom, pan, and perspective transformations to frame"""
@@ -248,6 +331,57 @@ class CameraController:
         """Enable or disable perspective correction for main stream"""
         self.perspective_correction_enabled = enabled
         return True
+
+    def pause_playback(self):
+        """Pause video playback"""
+        if self.source_type == "video":
+            self.paused = True
+            # Set pause buffer index to current position in buffer
+            self.pause_buffer_index = len(self.frame_buffer) - 1 if self.frame_buffer else 0
+            # Record the frame number when we paused
+            self.pause_frame_number = self.display_frame_number
+            return True
+        return False
+
+    def resume_playback(self):
+        """Resume video playback"""
+        if self.source_type == "video":
+            self.paused = False
+            return True
+        return False
+
+    def step_frame_forward(self):
+        """Step one frame forward when paused"""
+        if self.source_type == "video" and self.paused:
+            self.step_direction = 1
+            self.step_frame = True
+            return True
+        return False
+
+    def step_frame_backward(self):
+        """Step one frame backward when paused"""
+        if self.source_type == "video" and self.paused:
+            self.step_direction = -1
+            self.step_frame = True
+            return True
+        return False
+
+    def is_paused(self):
+        """Check if playback is paused"""
+        return self.paused
+
+    def get_playback_info(self):
+        """Get current playback information"""
+        return {
+            'paused': self.paused,
+            'current_frame': self.display_frame_number,  # Use display frame number instead
+            'total_frames': self.total_frames,
+            'buffer_size': len(self.frame_buffer),
+            'pause_buffer_index': self.pause_buffer_index if self.paused else None,
+            'can_step_backward': self.paused and self.pause_buffer_index > 0,
+            'can_step_forward': self.paused and self.pause_buffer_index < len(self.frame_buffer) - 1,
+            'supports_playback_controls': self.source_type == "video"
+        }
 
     def get_debug_frame_jpeg(self, debug_type='combined'):
         """Get debug frame as JPEG bytes for specific debug type
@@ -402,6 +536,10 @@ class CameraController:
         # Add target detection status
         target_status = self.target_detector.get_detection_status()
         status.update(target_status)
+
+        # Add playback control status
+        playback_status = self.get_playback_info()
+        status.update(playback_status)
 
         return status
 
@@ -664,6 +802,34 @@ class StreamingHandler(BaseHTTPRequestHandler):
                     response = {'success': True, 'message': f'Perspective correction {status}'}
                 else:
                     response = {'success': False, 'message': 'Failed to set perspective correction'}
+
+            elif path == '/api/playback_pause':
+                if camera_controller.pause_playback():
+                    response = {'success': True, 'message': 'Video playback paused'}
+                else:
+                    response = {'success': False, 'message': 'Cannot pause (not playing video or already paused)'}
+
+            elif path == '/api/playback_resume':
+                if camera_controller.resume_playback():
+                    response = {'success': True, 'message': 'Video playback resumed'}
+                else:
+                    response = {'success': False, 'message': 'Cannot resume (not playing video or not paused)'}
+
+            elif path == '/api/playback_step_forward':
+                if camera_controller.step_frame_forward():
+                    response = {'success': True, 'message': 'Stepped forward one frame'}
+                else:
+                    response = {'success': False, 'message': 'Cannot step forward (not paused or no frames available)'}
+
+            elif path == '/api/playback_step_backward':
+                if camera_controller.step_frame_backward():
+                    response = {'success': True, 'message': 'Stepped backward one frame'}
+                else:
+                    response = {'success': False, 'message': 'Cannot step backward (not paused or at beginning)'}
+
+            elif path == '/api/playback_info':
+                playback_info = camera_controller.get_playback_info()
+                response = {'success': True, 'data': playback_info}
 
             self._send_json_response(response)
 
