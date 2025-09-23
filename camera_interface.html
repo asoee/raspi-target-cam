@@ -139,6 +139,31 @@
                 border-top: 1px solid #bdc3c7;
             }
         }
+
+        .debug-stream-buttons {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .debug-stream-btn {
+            padding: 8px 12px;
+            font-size: 12px;
+            border: 1px solid #ccc;
+            background: #f8f9fa;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .debug-stream-btn:hover:not(:disabled) {
+            background: #e9ecef;
+        }
+
+        .debug-stream-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 <body>
@@ -165,6 +190,13 @@
             <div class="controls-panel">
                 <div class="control-group">
                     <h3>🔧 Camera Controls</h3>
+
+                    <div class="control-row">
+                        <label>Video Source:</label>
+                        <select id="videoSource" onchange="changeVideoSource()" disabled>
+                            <option value="">Loading sources...</option>
+                        </select>
+                    </div>
 
                     <div class="control-row">
                         <label>Resolution:</label>
@@ -214,6 +246,14 @@
                             <option value="false">Disabled</option>
                         </select>
                     </div>
+
+                    <div class="control-row">
+                        <label>Perspective Correction:</label>
+                        <select id="perspectiveCorrection" onchange="togglePerspectiveCorrection()" disabled>
+                            <option value="false" selected>Disabled</option>
+                            <option value="true">Enabled</option>
+                        </select>
+                    </div>
                 </div>
 
                 <div class="control-group">
@@ -231,15 +271,19 @@
                         <label>Debug View:</label>
                         <select id="debugType" onchange="changeDebugType()" disabled>
                             <option value="combined" selected>Combined</option>
-                            <option value="corners">Corner Detection</option>
+                            <option value="perspective">Perspective Detection</option>
                             <option value="circles">Circle Detection</option>
                         </select>
                     </div>
 
                     <div class="control-row">
-                        <button onclick="openDebugStream()" disabled id="debugStreamBtn">
-                            🔍 Open Debug Stream
-                        </button>
+                        <label>Debug Streams:</label>
+                        <div class="debug-stream-buttons">
+                            <button onclick="openDebugStream('combined')" disabled class="debug-stream-btn">🔀 Combined</button>
+                            <button onclick="openDebugStream('perspective')" disabled class="debug-stream-btn">📐 Perspective</button>
+                            <button onclick="openDebugStream('circles')" disabled class="debug-stream-btn">⭕ Circles</button>
+                            <button onclick="openDebugStream('corrected')" disabled class="debug-stream-btn">🔧 Corrected</button>
+                        </div>
                     </div>
 
                     <div class="control-row">
@@ -293,6 +337,21 @@
                     <h3>ℹ️ Stream Info</h3>
 
                     <div class="control-row">
+                        <label>Current Resolution:</label>
+                        <span id="currentResolution">Loading...</span>
+                    </div>
+
+                    <div class="control-row">
+                        <label>Current FPS:</label>
+                        <span id="currentFPS">Loading...</span>
+                    </div>
+
+                    <div class="control-row">
+                        <label>Source Type:</label>
+                        <span id="sourceType">Loading...</span>
+                    </div>
+
+                    <div class="control-row">
                         <label>Stream URL:</label>
                         <input type="text" id="streamUrl" value="/stream.mjpg" readonly>
                     </div>
@@ -330,17 +389,170 @@
         }
 
         function enableControls() {
-            const controls = ['resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'debugMode', 'debugType', 'debugStreamBtn', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn'];
+            const controls = ['videoSource', 'resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'perspectiveCorrection', 'debugMode', 'debugType', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn'];
             controls.forEach(id => {
                 document.getElementById(id).disabled = false;
             });
+
+            // Enable debug stream buttons
+            const debugButtons = document.querySelectorAll('.debug-stream-btn');
+            debugButtons.forEach(btn => btn.disabled = false);
         }
 
         function disableControls() {
-            const controls = ['resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'debugMode', 'debugType', 'debugStreamBtn', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn'];
+            const controls = ['videoSource', 'resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'perspectiveCorrection', 'debugMode', 'debugType', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn'];
             controls.forEach(id => {
                 document.getElementById(id).disabled = true;
             });
+
+            // Disable debug stream buttons
+            const debugButtons = document.querySelectorAll('.debug-stream-btn');
+            debugButtons.forEach(btn => btn.disabled = true);
+        }
+
+        function updateControlsForVideoMode(isVideoMode, nativeResolution, nativeFps) {
+            // Controls that should be disabled for video files
+            const videoRestrictedControls = ['resolution'];
+
+            // Controls that work differently for video vs camera
+            const modifiedControls = ['recordBtn'];
+
+            videoRestrictedControls.forEach(id => {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.disabled = isVideoMode;
+                    if (isVideoMode) {
+                        element.style.opacity = '0.5';
+                        element.title = 'Resolution is fixed for video files';
+                    } else {
+                        element.style.opacity = '';
+                        element.title = '';
+                    }
+                }
+            });
+
+            // Update resolution display for video files
+            if (isVideoMode && nativeResolution) {
+                const resolutionSelect = document.getElementById('resolution');
+                const currentValue = `${nativeResolution[0]}x${nativeResolution[1]}`;
+
+                // Find if this resolution exists in the options
+                let optionExists = false;
+                for (let option of resolutionSelect.options) {
+                    if (option.value === currentValue) {
+                        optionExists = true;
+                        break;
+                    }
+                }
+
+                // If native resolution doesn't exist in dropdown, add it temporarily
+                if (!optionExists) {
+                    const option = document.createElement('option');
+                    option.value = currentValue;
+                    option.textContent = `${nativeResolution[0]} x ${nativeResolution[1]} (Video Native @ ${nativeFps?.toFixed(1) || '?'} fps)`;
+                    option.selected = true;
+                    resolutionSelect.appendChild(option);
+                } else {
+                    resolutionSelect.value = currentValue;
+                }
+            }
+
+            // Update record button for video files
+            const recordBtn = document.getElementById('recordBtn');
+            if (recordBtn) {
+                if (isVideoMode) {
+                    recordBtn.textContent = '🎬 Playing Video';
+                    recordBtn.disabled = true;
+                    recordBtn.style.opacity = '0.5';
+                    recordBtn.title = 'Cannot record while playing video file';
+                } else {
+                    recordBtn.textContent = '🔴 Start Recording';
+                    recordBtn.disabled = false;
+                    recordBtn.style.opacity = '';
+                    recordBtn.title = '';
+                }
+            }
+        }
+
+        function updateStreamInfo(status) {
+            // Update current resolution display
+            const currentResolution = document.getElementById('currentResolution');
+            if (currentResolution && status.actual_resolution) {
+                currentResolution.textContent = `${status.actual_resolution[0]} × ${status.actual_resolution[1]}`;
+
+                // Add native info for video files
+                if (status.is_video_mode && status.native_video_resolution) {
+                    const isNative = (status.actual_resolution[0] === status.native_video_resolution[0] &&
+                                    status.actual_resolution[1] === status.native_video_resolution[1]);
+                    if (isNative) {
+                        currentResolution.textContent += ' (Native)';
+                        currentResolution.style.color = '#4CAF50'; // Green for native
+                    } else {
+                        currentResolution.textContent += ' (Scaled)';
+                        currentResolution.style.color = '#FF9800'; // Orange for scaled
+                    }
+                } else {
+                    currentResolution.style.color = ''; // Default color
+                }
+            }
+
+            // Update current FPS display
+            const currentFPS = document.getElementById('currentFPS');
+            if (currentFPS && status.actual_fps) {
+                const fpsValue = status.actual_fps.toFixed(1);
+                currentFPS.textContent = `${fpsValue} fps`;
+
+                // Add native info for video files
+                if (status.is_video_mode && status.native_video_fps) {
+                    const isNative = Math.abs(status.actual_fps - status.native_video_fps) < 0.1;
+                    if (isNative) {
+                        currentFPS.textContent += ' (Native)';
+                        currentFPS.style.color = '#4CAF50'; // Green for native
+                    } else {
+                        currentFPS.textContent += ' (Modified)';
+                        currentFPS.style.color = '#FF9800'; // Orange for modified
+                    }
+                } else {
+                    currentFPS.style.color = ''; // Default color
+                }
+            }
+
+            // Update source type display
+            const sourceType = document.getElementById('sourceType');
+            if (sourceType && status.source_type) {
+                if (status.source_type === 'camera') {
+                    sourceType.textContent = `📷 Camera ${status.current_source}`;
+                    sourceType.style.color = '#2196F3'; // Blue for camera
+                } else if (status.source_type === 'video') {
+                    const filename = status.current_source ? status.current_source.split('/').pop() : 'Unknown';
+                    sourceType.textContent = `🎬 Video: ${filename}`;
+                    sourceType.style.color = '#9C27B0'; // Purple for video
+                }
+            }
+        }
+
+        function changeVideoSource() {
+            const sourceSelect = document.getElementById('videoSource');
+            const selectedValue = sourceSelect.value;
+
+            if (!selectedValue) return;
+
+            const [sourceType, sourceId] = selectedValue.split('|');
+            updateStatus(`🔄 Changing video source to ${sourceId}...`, false);
+
+            apiCall('/api/change_source', { source_type: sourceType, source_id: sourceId })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        setTimeout(() => {
+                            refreshStream();
+                            loadCameraStatus(); // Reload status to update controls for new source
+                        }, 1000);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Source change error: ${error}`, true));
         }
 
         function changeResolution() {
@@ -355,6 +567,8 @@
                         setTimeout(refreshStream, 1000);
                     } else {
                         updateStatus(`❌ ${response.message}`, true);
+                        // If resolution change failed (e.g., video mode), reload status to reset UI
+                        loadCameraStatus();
                     }
                 })
                 .catch(error => updateStatus(`❌ Error: ${error}`, true));
@@ -419,6 +633,23 @@
                 .catch(error => updateStatus(`❌ Target detection error: ${error}`, true));
         }
 
+        function togglePerspectiveCorrection() {
+            const enabled = document.getElementById('perspectiveCorrection').value === 'true';
+            const status = enabled ? 'Enabling' : 'Disabling';
+            updateStatus(`🔧 ${status} perspective correction...`, false);
+
+            apiCall('/api/perspective_correction', { enabled: enabled })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        setTimeout(refreshStream, 1000);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Perspective correction error: ${error}`, true));
+        }
+
         function toggleDebugMode() {
             const enabled = document.getElementById('debugMode').value === 'true';
             const status = enabled ? 'Enabling' : 'Disabling';
@@ -435,10 +666,13 @@
                 .catch(error => updateStatus(`❌ Debug mode error: ${error}`, true));
         }
 
-        function openDebugStream() {
-            const debugUrl = '/debug.mjpg';
-            window.open(debugUrl, 'debugStream', 'width=800,height=600,scrollbars=no,resizable=yes');
-            updateStatus("🔍 Debug stream opened in new window", false);
+        function openDebugStream(debugType = 'combined') {
+            const debugUrl = `/debug.mjpg?type=${debugType}`;
+            const windowName = `debugStream_${debugType}`;
+            const windowFeatures = 'width=800,height=600,scrollbars=no,resizable=yes';
+
+            window.open(debugUrl, windowName, windowFeatures);
+            updateStatus(`🔍 ${debugType.charAt(0).toUpperCase() + debugType.slice(1)} debug stream opened in new window`, false);
         }
 
         function changeDebugType() {
@@ -556,6 +790,9 @@
 
         // Initialize on page load
         window.addEventListener('load', function() {
+            // Load available sources first
+            loadAvailableSources();
+
             // Load current camera status
             loadCameraStatus();
 
@@ -579,6 +816,53 @@
             return await response.json();
         }
 
+        // Load available video sources
+        function loadAvailableSources() {
+            fetch('/api/sources')
+                .then(response => response.json())
+                .then(sources => {
+                    const sourceSelect = document.getElementById('videoSource');
+                    sourceSelect.innerHTML = '';
+
+                    // Add cameras
+                    if (sources.cameras && sources.cameras.length > 0) {
+                        const cameraGroup = document.createElement('optgroup');
+                        cameraGroup.label = '📷 Cameras';
+                        sources.cameras.forEach(camera => {
+                            const option = document.createElement('option');
+                            option.value = `camera|${camera.id}`;
+                            option.textContent = camera.name;
+                            cameraGroup.appendChild(option);
+                        });
+                        sourceSelect.appendChild(cameraGroup);
+                    }
+
+                    // Add video files
+                    if (sources.videos && sources.videos.length > 0) {
+                        const videoGroup = document.createElement('optgroup');
+                        videoGroup.label = '🎬 Sample Videos';
+                        sources.videos.forEach(video => {
+                            const option = document.createElement('option');
+                            option.value = `video|${video.id}`;
+                            option.textContent = video.name;
+                            videoGroup.appendChild(option);
+                        });
+                        sourceSelect.appendChild(videoGroup);
+                    }
+
+                    if (sourceSelect.options.length === 0) {
+                        const option = document.createElement('option');
+                        option.value = '';
+                        option.textContent = 'No sources available';
+                        sourceSelect.appendChild(option);
+                    }
+                })
+                .catch(error => {
+                    console.error('Failed to load sources:', error);
+                    document.getElementById('videoSource').innerHTML = '<option value="">Error loading sources</option>';
+                });
+        }
+
         // Load camera status on page load
         function loadCameraStatus() {
             fetch('/api/status')
@@ -593,6 +877,7 @@
                     document.getElementById('panYValue').textContent = status.pan_y;
                     document.getElementById('rotation').value = status.rotation;
                     document.getElementById('targetDetection').value = status.detection_enabled ? 'true' : 'false';
+                    document.getElementById('perspectiveCorrection').value = status.perspective_correction_enabled ? 'true' : 'false';
                     document.getElementById('debugMode').value = status.debug_mode ? 'true' : 'false';
                     document.getElementById('debugType').value = status.debug_type || 'combined';
                     document.getElementById('calibrationMode').value = status.calibration_mode ? 'true' : 'false';
@@ -602,6 +887,34 @@
                     if ([...resSelect.options].some(opt => opt.value === currentRes)) {
                         resSelect.value = currentRes;
                     }
+
+                    // Set current video source
+                    const sourceSelect = document.getElementById('videoSource');
+                    let currentSourceValue = '';
+                    if (status.source_type === 'camera') {
+                        currentSourceValue = `camera|camera_${status.current_source}`;
+                    } else if (status.source_type === 'video') {
+                        const filename = status.current_source.split('/').pop();
+                        currentSourceValue = `video|video_${filename}`;
+                    }
+
+                    // Find and select the current source
+                    for (let i = 0; i < sourceSelect.options.length; i++) {
+                        if (sourceSelect.options[i].value === currentSourceValue) {
+                            sourceSelect.selectedIndex = i;
+                            break;
+                        }
+                    }
+
+                    // Update controls based on video mode
+                    updateControlsForVideoMode(
+                        status.is_video_mode,
+                        status.native_video_resolution,
+                        status.native_video_fps
+                    );
+
+                    // Update stream info display
+                    updateStreamInfo(status);
                 })
                 .catch(error => console.error('Failed to load status:', error));
         }

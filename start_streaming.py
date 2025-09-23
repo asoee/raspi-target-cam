@@ -15,7 +15,7 @@ def start_servers():
     processes = []
 
     try:
-        print("Starting camera stream server on port 8080...")
+        print("Starting camera stream server on port 8088...")
         camera_process = subprocess.Popen([sys.executable, 'camera_stream.py'])
         processes.append(camera_process)
         time.sleep(2)  # Give camera time to initialize
@@ -27,7 +27,7 @@ def start_servers():
         print("\n" + "="*50)
         print("🎯 Raspberry Pi Camera Streaming System")
         print("="*50)
-        print("Camera Stream: http://localhost:8080/stream.mjpg")
+        print("Camera Stream: http://localhost:8088/stream.mjpg")
         print("Web Interface: http://localhost:8081")
         print("="*50)
         print("\nPress Ctrl+C to stop both servers...")

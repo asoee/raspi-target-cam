@@ -9,4 +9,4 @@ echo "Python path: $(which python)"
 echo "To deactivate, run: deactivate"
 
 # Keep the shell open in the activated environment
-exec bash
+#exec bash

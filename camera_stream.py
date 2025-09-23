@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Camera HTTP Streaming Server
-Provides MJPEG stream from camera on HTTP port 8080
+Provides MJPEG stream from camera on HTTP port 8088
 """
 
 import cv2
@@ -109,9 +109,9 @@ def main():
         return
 
     # Start streaming server
-    server = ThreadingHTTPServer(('0.0.0.0', 8080), StreamingHandler)
-    print("Camera stream server starting on port 8080...")
-    print("Stream URL: http://localhost:8080/stream.mjpg")
+    server = ThreadingHTTPServer(('0.0.0.0', 8088), StreamingHandler)
+    print("Camera stream server starting on port 8088...")
+    print("Stream URL: http://localhost:8088/stream.mjpg")
 
     try:
         server.serve_forever()

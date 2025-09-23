@@ -21,6 +21,8 @@ class CameraController:
 
     def __init__(self, camera_index=0):
         self.camera_index = camera_index
+        self.video_file = None  # For video file input
+        self.source_type = "camera"  # "camera" or "video"
         self.cap = None
         self.frame = None
         self.running = False
@@ -37,26 +39,61 @@ class CameraController:
         self.captures_dir = "./captures"
         os.makedirs(self.captures_dir, exist_ok=True)
 
+        # Video file settings
+        self.samples_dir = "./samples"
+        self.video_fps = 30  # Default FPS for video files
+        self.video_frame_time = 1.0 / self.video_fps  # Time between frames
+        self.native_video_resolution = None  # Native resolution of video file
+        self.native_video_fps = None  # Native FPS of video file
+
         # Target detection
         self.target_detector = TargetDetector()
 
-    def start_capture(self):
-        """Initialize and start camera capture"""
-        try:
-            self.cap = cv2.VideoCapture(self.camera_index)
-            if not self.cap.isOpened():
-                raise RuntimeError(f"Could not open camera {self.camera_index}")
+        # Perspective correction for main stream
+        self.perspective_correction_enabled = False
 
-            # Set initial resolution
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    def start_capture(self):
+        """Initialize and start camera or video file capture"""
+        try:
+            if self.source_type == "camera":
+                self.cap = cv2.VideoCapture(self.camera_index)
+                if not self.cap.isOpened():
+                    raise RuntimeError(f"Could not open camera {self.camera_index}")
+
+                # Set initial resolution for camera
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            else:  # video file
+                if not self.video_file or not os.path.exists(self.video_file):
+                    raise RuntimeError(f"Video file not found: {self.video_file}")
+
+                self.cap = cv2.VideoCapture(self.video_file)
+                if not self.cap.isOpened():
+                    raise RuntimeError(f"Could not open video file: {self.video_file}")
+
+                # Get video properties and override settings
+                fps = self.cap.get(cv2.CAP_PROP_FPS)
+                width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+                if fps > 0:
+                    self.video_fps = fps
+                    self.native_video_fps = fps
+                    self.video_frame_time = 1.0 / fps
+
+                if width > 0 and height > 0:
+                    self.native_video_resolution = (width, height)
+                    # Override resolution for video files to match native resolution
+                    self.resolution = (width, height)
+
+                print(f"Video properties: {width}x{height} @ {fps:.1f} FPS")
 
             self.running = True
             threading.Thread(target=self._capture_loop, daemon=True).start()
             return True
         except Exception as e:
-            print(f"Failed to initialize camera: {e}")
+            print(f"Failed to initialize capture: {e}")
             return False
 
     def _capture_loop(self):
@@ -69,16 +106,49 @@ class CameraController:
 
                 with self.lock:
                     self.frame = processed_frame.copy()
-            time.sleep(0.03)  # ~30 FPS
+            else:
+                # If video file reached end, loop back to beginning
+                if self.source_type == "video":
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
+
+            # Use appropriate sleep timing
+            if self.source_type == "video":
+                time.sleep(self.video_frame_time)
+            else:
+                time.sleep(0.03)  # ~30 FPS for camera
 
     def _apply_transformations(self, frame):
-        """Apply rotation, zoom and pan transformations to frame"""
+        """Apply rotation, zoom, pan, and perspective transformations to frame"""
+        original_size = (frame.shape[1], frame.shape[0])  # (width, height)
+
         # Apply rotation first
         if self.rotation != 0:
             frame = self._rotate_frame(frame, self.rotation)
 
-        # Apply target detection overlay
-        frame = self.target_detector.draw_target_overlay(frame)
+        # Handle perspective correction and target detection together
+        if self.perspective_correction_enabled:
+            # Get the perspective matrix from target detector
+            perspective_matrix = self.target_detector.get_perspective_matrix()
+            if perspective_matrix is not None:
+                # Apply perspective correction to the frame maintaining original size
+                corrected_frame = self.target_detector.apply_perspective_correction(
+                    frame, perspective_matrix, self.target_detector.corrected_target_size
+                )
+                if corrected_frame is not None:
+                    frame = corrected_frame
+                    # For perspective-corrected streams, detect targets on the corrected frame
+                    # This ensures target overlays are accurate for the corrected view
+                    frame = self.target_detector.draw_target_overlay(frame, frame_is_corrected=True)
+                else:
+                    # Perspective correction failed, use original frame with target overlay
+                    frame = self.target_detector.draw_target_overlay(frame)
+            else:
+                # No perspective matrix available, use original frame with target overlay
+                frame = self.target_detector.draw_target_overlay(frame)
+        else:
+            # No perspective correction, use original frame with target overlay
+            frame = self.target_detector.draw_target_overlay(frame)
 
         # Skip other transformations if no zoom or pan
         if self.zoom == 1.0 and self.pan_x == 0 and self.pan_y == 0:
@@ -134,7 +204,11 @@ class CameraController:
         return None
 
     def set_resolution(self, width, height):
-        """Change camera resolution"""
+        """Change camera resolution (only works for cameras, not video files)"""
+        if self.source_type == "video":
+            # Cannot change resolution for video files
+            return False
+
         self.resolution = (width, height)
         if self.cap and self.cap.isOpened():
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -170,14 +244,34 @@ class CameraController:
         self.target_detector.set_debug_mode(enabled)
         return True
 
-    def get_debug_frame_jpeg(self):
-        """Get debug frame as JPEG bytes"""
+    def set_perspective_correction(self, enabled):
+        """Enable or disable perspective correction for main stream"""
+        self.perspective_correction_enabled = enabled
+        return True
+
+    def get_debug_frame_jpeg(self, debug_type='combined'):
+        """Get debug frame as JPEG bytes for specific debug type
+
+        Args:
+            debug_type: Type of debug frame ('combined', 'perspective', 'circles', 'corrected')
+        """
         # Generate fresh debug frame from current frame if debug mode is on
         with self.lock:
             if self.frame is not None and self.target_detector.debug_mode:
                 self.target_detector.generate_debug_frame(self.frame)
 
-        return self.target_detector.get_debug_frame_jpeg()
+                # For corrected debug type, provide the perspective-corrected frame
+                if debug_type == 'corrected' and self.perspective_correction_enabled:
+                    perspective_matrix = self.target_detector.get_perspective_matrix()
+                    if perspective_matrix is not None:
+                        corrected_frame = self.target_detector.apply_perspective_correction(
+                            self.frame, perspective_matrix, (self.frame.shape[1], self.frame.shape[0])
+                        )
+                        if corrected_frame is not None:
+                            # Temporarily store corrected frame for debug access
+                            self.target_detector.corrected_debug_frame = corrected_frame
+
+        return self.target_detector.get_debug_frame_jpeg(debug_type)
 
     def capture_image(self):
         """Capture and save current frame"""
@@ -199,16 +293,110 @@ class CameraController:
             else:
                 return False, "No frame available for calibration"
 
+    def get_available_sources(self):
+        """Get list of available cameras and video files"""
+        sources = {
+            'cameras': [],
+            'videos': []
+        }
+
+        # Check for available cameras (0-5)
+        for i in range(6):
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                sources['cameras'].append({
+                    'id': f'camera_{i}',
+                    'name': f'Camera {i}',
+                    'index': i
+                })
+                cap.release()
+
+        # Check for video files in samples directory
+        if os.path.exists(self.samples_dir):
+            for filename in os.listdir(self.samples_dir):
+                if filename.lower().endswith(('.avi', '.mp4', '.mov', '.mkv', '.wmv')):
+                    filepath = os.path.join(self.samples_dir, filename)
+                    sources['videos'].append({
+                        'id': f'video_{filename}',
+                        'name': filename,
+                        'path': filepath
+                    })
+
+        return sources
+
+    def set_video_source(self, source_type, source_id):
+        """Change video source (camera or video file)"""
+        try:
+            # Stop current capture
+            self.stop()
+            time.sleep(0.5)  # Wait for capture loop to stop
+
+            if source_type == "camera":
+                # Extract camera index from source_id like "camera_0"
+                camera_index = int(source_id.split('_')[1])
+                self.camera_index = camera_index
+                self.source_type = "camera"
+                self.video_file = None
+                # Clear video-specific properties
+                self.native_video_resolution = None
+                self.native_video_fps = None
+            elif source_type == "video":
+                # Extract filename from source_id like "video_filename.avi"
+                filename = source_id.replace('video_', '', 1)
+                video_path = os.path.join(self.samples_dir, filename)
+                if not os.path.exists(video_path):
+                    return False, f"Video file not found: {filename}"
+
+                self.source_type = "video"
+                self.video_file = video_path
+            else:
+                return False, f"Invalid source type: {source_type}"
+
+            # Start capture with new source
+            if self.start_capture():
+                return True, f"Source changed to {source_type}: {source_id}"
+            else:
+                return False, f"Failed to start capture with new source"
+
+        except Exception as e:
+            return False, f"Error changing source: {str(e)}"
+
     def get_status(self):
         """Get current camera status"""
+        # Get actual current FPS and resolution from the capture device
+        current_fps = self.video_fps if self.source_type == "video" else 30.0  # Default camera FPS
+        current_resolution = self.resolution
+
+        # Try to get actual values from capture device if available
+        if self.cap and self.cap.isOpened():
+            try:
+                actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+
+                if actual_width > 0 and actual_height > 0:
+                    current_resolution = (actual_width, actual_height)
+                if actual_fps > 0:
+                    current_fps = actual_fps
+            except:
+                pass  # Use defaults if unable to get actual values
+
         status = {
             'resolution': self.resolution,
+            'actual_resolution': current_resolution,
+            'actual_fps': current_fps,
             'zoom': self.zoom,
             'pan_x': self.pan_x,
             'pan_y': self.pan_y,
             'rotation': self.rotation,
             'running': self.running,
-            'captures_dir': self.captures_dir
+            'captures_dir': self.captures_dir,
+            'source_type': self.source_type,
+            'current_source': self.camera_index if self.source_type == "camera" else self.video_file,
+            'perspective_correction_enabled': self.perspective_correction_enabled,
+            'is_video_mode': self.source_type == "video",
+            'native_video_resolution': self.native_video_resolution,
+            'native_video_fps': self.native_video_fps
         }
 
         # Add target detection status
@@ -235,11 +423,16 @@ class StreamingHandler(BaseHTTPRequestHandler):
         if path == '/stream.mjpg':
             self._serve_mjpeg_stream()
         elif path == '/debug.mjpg':
-            self._serve_debug_stream()
+            # Parse debug type parameter
+            query_params = parse_qs(parsed_path.query)
+            debug_type = query_params.get('type', ['combined'])[0]  # Default to 'combined'
+            self._serve_debug_stream(debug_type)
         elif path == '/' or path == '/index.html':
             self._serve_file('camera_interface.html')
         elif path == '/api/status':
             self._serve_api_status()
+        elif path == '/api/sources':
+            self._serve_api_sources()
         elif path.endswith('.html') or path.endswith('.css') or path.endswith('.js'):
             self._serve_file(path[1:])  # Remove leading slash
         else:
@@ -277,8 +470,12 @@ class StreamingHandler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"Stream client disconnected: {e}")
 
-    def _serve_debug_stream(self):
-        """Serve MJPEG debug stream showing threshold and contours"""
+    def _serve_debug_stream(self, debug_type='combined'):
+        """Serve MJPEG debug stream for specific debug type
+
+        Args:
+            debug_type: Type of debug stream ('combined', 'perspective', 'circles', 'corrected')
+        """
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
         self.send_header('Cache-Control', 'no-cache')
@@ -287,7 +484,7 @@ class StreamingHandler(BaseHTTPRequestHandler):
 
         try:
             while True:
-                debug_data = camera_controller.get_debug_frame_jpeg()
+                debug_data = camera_controller.get_debug_frame_jpeg(debug_type)
                 if debug_data and len(debug_data) > 100:  # Valid JPEG should be larger
                     self.wfile.write(b'--frame\r\n')
                     self.send_header('Content-Type', 'image/jpeg')
@@ -304,10 +501,13 @@ class StreamingHandler(BaseHTTPRequestHandler):
                     img = np.zeros((480, 640, 3), dtype=np.uint8)
                     img.fill(50)  # Dark gray background
 
-                    cv2.putText(img, "DEBUG MODE", (200, 200),
-                               cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 255), 3)
-                    cv2.putText(img, "Enable debug mode in the web interface", (80, 300),
+                    # Display debug type and status
+                    cv2.putText(img, f"DEBUG MODE: {debug_type.upper()}", (120, 200),
+                               cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3)
+                    cv2.putText(img, "Enable debug mode in the web interface", (80, 280),
                                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    cv2.putText(img, f"Stream: /debug.mjpg?type={debug_type}", (120, 320),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 255), 2)
 
                     _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 85])
                     placeholder = buffer.tobytes()
@@ -355,6 +555,11 @@ class StreamingHandler(BaseHTTPRequestHandler):
         """Serve camera status as JSON"""
         status = camera_controller.get_status()
         self._send_json_response(status)
+
+    def _serve_api_sources(self):
+        """Serve available sources as JSON"""
+        sources = camera_controller.get_available_sources()
+        self._send_json_response(sources)
 
     def _handle_api_request(self, path):
         """Handle API requests"""
@@ -446,6 +651,20 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 else:
                     response = {'success': False, 'message': 'Failed to capture image'}
 
+            elif path == '/api/change_source':
+                source_type = data.get('source_type', '')
+                source_id = data.get('source_id', '')
+                success, message = camera_controller.set_video_source(source_type, source_id)
+                response = {'success': success, 'message': message}
+
+            elif path == '/api/perspective_correction':
+                enabled = data.get('enabled', False)
+                if camera_controller.set_perspective_correction(enabled):
+                    status = "enabled" if enabled else "disabled"
+                    response = {'success': True, 'message': f'Perspective correction {status}'}
+                else:
+                    response = {'success': False, 'message': 'Failed to set perspective correction'}
+
             self._send_json_response(response)
 
         except Exception as e:
@@ -491,11 +710,11 @@ def main():
     print("✅ Camera initialized successfully")
 
     # Start unified HTTP server
-    server = ThreadingHTTPServer(('0.0.0.0', 8080), StreamingHandler)
-    print("🌐 Server starting on port 8080...")
-    print("📺 Camera stream: http://localhost:8080/stream.mjpg")
-    print("🖥️  Web interface: http://localhost:8080")
-    print("🔧 API endpoints: http://localhost:8080/api/")
+    server = ThreadingHTTPServer(('0.0.0.0', 8088), StreamingHandler)
+    print("🌐 Server starting on port 8088...")
+    print("📺 Camera stream: http://localhost:8088/stream.mjpg")
+    print("🖥️  Web interface: http://localhost:8088")
+    print("🔧 API endpoints: http://localhost:8088/api/")
 
     try:
         server.serve_forever()

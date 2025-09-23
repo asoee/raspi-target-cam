@@ -49,7 +49,7 @@ class TargetDetector:
 
         # Debug visualization
         self.debug_mode = False
-        self.debug_type = "combined"  # "combined", "corners", "circles"
+        self.debug_type = "combined"  # "combined", "perspective", "circles"
         self.debug_frame = None
         self.debug_contours = None
         self.corner_debug_frame = None
@@ -61,6 +61,9 @@ class TargetDetector:
         self.saved_perspective_matrix = None
         self.saved_ellipse_data = None
         self.calibration_resolution = None
+
+        # Debug frames
+        self.corrected_debug_frame = None  # For perspective-corrected debug view
 
         # Load saved calibration on startup
         self.load_perspective_calibration()
@@ -432,6 +435,35 @@ class TargetDetector:
                            (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
                 cv2.putText(self.corner_debug_frame, f"Score: {best_score:.3f}",
                            (10, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+
+                # Add visual debugging for transformation points
+                # Calculate the same points that will be used for transformation
+                semi_major = major_axis / 2
+                semi_minor = minor_axis / 2
+                angle_rad = np.radians(angle)
+                cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+
+                # Calculate extreme points
+                a, b = semi_major, semi_minor
+                x_extent = np.sqrt((a * cos_a)**2 + (b * sin_a)**2)
+                y_extent = np.sqrt((a * sin_a)**2 + (b * cos_a)**2)
+
+                # Mark the transformation points on the debug frame
+                debug_points = [
+                    (int(center_x + x_extent), int(center_y)),      # Right
+                    (int(center_x), int(center_y - y_extent)),      # Top
+                    (int(center_x - x_extent), int(center_y)),      # Left
+                    (int(center_x), int(center_y + y_extent))       # Bottom
+                ]
+
+                colors = [(0, 255, 255), (255, 0, 255), (255, 255, 0), (255, 128, 0)]  # Different colors for each point
+                labels = ["R", "T", "L", "B"]
+
+                for i, (point, color, label) in enumerate(zip(debug_points, colors, labels)):
+                    cv2.circle(self.corner_debug_frame, point, 8, color, -1)
+                    cv2.putText(self.corner_debug_frame, label, (point[0] + 10, point[1] - 10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
             else:
                 cv2.putText(self.corner_debug_frame, "No suitable ellipse found",
                            (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
@@ -453,58 +485,200 @@ class TargetDetector:
 
         if best_ellipse is not None:
             # Calculate perspective transformation from ellipse
-            return self._ellipse_to_perspective_transform(best_ellipse, (w, h))
+            perspective_matrix = self._ellipse_to_perspective_transform(best_ellipse, (w, h))
+
+            # Create side-by-side debug frame with correction preview
+            # Use the newly calculated matrix, or fall back to saved matrix if available
+            preview_matrix = perspective_matrix if perspective_matrix is not None else self.perspective_matrix
+            if self.debug_mode and self.corner_debug_frame is not None and preview_matrix is not None:
+                self._create_perspective_debug_with_preview(frame, preview_matrix)
+
+            return perspective_matrix
+
+        # If no ellipse found but we have a saved matrix, still show preview for reference
+        elif self.debug_mode and self.corner_debug_frame is not None and self.perspective_matrix is not None:
+            self._create_perspective_debug_with_preview(frame, self.perspective_matrix)
 
         return None
 
-    def _ellipse_to_perspective_transform(self, ellipse, frame_size):
+    def _create_perspective_debug_with_preview(self, original_frame, perspective_matrix):
+        """Create side-by-side perspective debug frame with correction preview"""
+        h, w = original_frame.shape[:2]
+
+        # Create side-by-side canvas (double width)
+        combined_width = w * 2
+        combined_height = h
+        side_by_side_frame = np.zeros((combined_height, combined_width, 3), dtype=np.uint8)
+
+        # Left side: Current corner debug frame (detection visualization)
+        if self.corner_debug_frame is not None:
+            resized_debug = cv2.resize(self.corner_debug_frame, (w, h))
+            side_by_side_frame[:h, :w] = resized_debug
+
+        # Right side: Perspective-corrected preview
+        try:
+            # Check if this is an affine or perspective matrix and apply accordingly
+            if perspective_matrix.shape == (2, 3):
+                # Affine transformation
+                corrected_preview = cv2.warpAffine(original_frame, perspective_matrix, (w, h))
+            elif perspective_matrix.shape == (3, 3):
+                # Perspective transformation
+                corrected_preview = cv2.warpPerspective(original_frame, perspective_matrix, (w, h))
+            else:
+                raise ValueError(f"Unsupported matrix shape: {perspective_matrix.shape}")
+
+            side_by_side_frame[:h, w:] = corrected_preview
+
+            # Determine if this is using saved or new calibration
+            is_saved_matrix = np.array_equal(perspective_matrix, self.perspective_matrix) if self.perspective_matrix is not None else False
+            matrix_source = "SAVED CALIBRATION" if is_saved_matrix else "LIVE DETECTION"
+
+            # Add labels
+            cv2.putText(side_by_side_frame, "DETECTION", (10, 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+            cv2.putText(side_by_side_frame, "CORRECTED PREVIEW", (w + 10, 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+            cv2.putText(side_by_side_frame, f"({matrix_source})", (w + 10, 80),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+            # Show where the transformation points map to in the corrected image
+            margin = 50
+            square_size = min(w, h) - 2 * margin
+            square_half = square_size / 2
+            center_x_dst = w / 2
+            center_y_dst = h / 2
+
+            corrected_points = [
+                (int(w + center_x_dst + square_half), int(center_y_dst)),      # Right
+                (int(w + center_x_dst), int(center_y_dst - square_half)),      # Top
+                (int(w + center_x_dst - square_half), int(center_y_dst)),      # Left
+                (int(w + center_x_dst), int(center_y_dst + square_half))       # Bottom
+            ]
+
+            colors = [(0, 255, 255), (255, 0, 255), (255, 255, 0), (255, 128, 0)]
+            labels = ["R", "T", "L", "B"]
+
+            for point, color, label in zip(corrected_points, colors, labels):
+                cv2.circle(side_by_side_frame, point, 8, color, -1)
+                cv2.putText(side_by_side_frame, label, (point[0] + 10, point[1] - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+            # Draw expected outer ring circle in the corrected preview
+            # This shows where we expect the outer ring to be after transformation
+            expected_ring_center = (int(w + center_x_dst), int(center_y_dst))
+            expected_ring_radius = int(square_half * 0.85)  # Slightly smaller than the square to account for margin
+            cv2.circle(side_by_side_frame, expected_ring_center, expected_ring_radius, (0, 255, 0), 3)
+            cv2.putText(side_by_side_frame, "Expected outer ring",
+                       (w + 10, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            # Add a dividing line
+            cv2.line(side_by_side_frame, (w, 0), (w, h), (255, 255, 255), 2)
+
+        except cv2.error as e:
+            # If perspective correction fails, show error message on right side
+            error_frame = np.zeros((h, w, 3), dtype=np.uint8)
+            error_frame.fill(50)  # Dark gray background
+            cv2.putText(error_frame, "CORRECTION FAILED", (w//4, h//2 - 20),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+            cv2.putText(error_frame, str(e)[:40], (10, h//2 + 20),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+            side_by_side_frame[:h, w:] = error_frame
+
+            # Add labels
+            cv2.putText(side_by_side_frame, "DETECTION", (10, 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+            cv2.putText(side_by_side_frame, "ERROR", (w + 10, 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+
+            # Add a dividing line
+            cv2.line(side_by_side_frame, (w, 0), (w, h), (255, 255, 255), 2)
+
+        # Replace the corner debug frame with the side-by-side version
+        self.corner_debug_frame = side_by_side_frame
+
+    def _ellipse_to_perspective_transform(self, ellipse, frame_size, output_size=None):
         """
-        Calculate affine transformation matrix from ellipse parameters
-        to correct the perspective so the ellipse becomes a circle
+        Calculate perspective transformation matrix from ellipse parameters
+        to correct the perspective so the ellipse becomes a centered circle
         """
         (center_x, center_y), (minor_axis, major_axis), angle = ellipse
         w, h = frame_size
 
-        # Determine which axis is major/minor and calculate compression
-        if major_axis > minor_axis:
-            compression_ratio = minor_axis / major_axis
-            rotation_angle = angle
-        else:
-            compression_ratio = major_axis / minor_axis
-            rotation_angle = angle + 90
+        # Get ellipse parameters
+        semi_major = major_axis / 2
+        semi_minor = minor_axis / 2
+        angle_rad = np.radians(angle)
 
-        # Convert angle to radians
-        angle_rad = np.radians(rotation_angle)
-
-        # For affine transformation, we'll use cv2.getRotationMatrix2D and scaling
-        # 1. Create rotation matrix around ellipse center
-        rotation_matrix = cv2.getRotationMatrix2D((center_x, center_y), rotation_angle, 1.0)
-
-        # 2. Create scaling matrix to correct aspect ratio
-        # We need to stretch along the minor axis direction
+        # Calculate the major axis direction and find the ellipse extremes
         cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
 
-        # Scale factor to make ellipse circular
-        scale_factor = 1.0 / compression_ratio
+        # Use a simpler affine approach: scale directly along the minor axis direction
+        # This preserves image orientation while making the ellipse circular
 
-        # Create transformation matrix that:
-        # 1. Translates to origin
-        # 2. Rotates to align with axes
-        # 3. Scales to correct aspect ratio
-        # 4. Rotates back
-        # 5. Translates back
+        # Calculate the scaling factor needed to make ellipse circular
+        scale_factor = major_axis / minor_axis
 
-        # Simplified approach: create affine matrix directly
-        M = np.array([[1.0, 0.0, 0.0],
-                      [0.0, scale_factor, 0.0]], dtype=np.float32)
+        # Calculate the minor axis direction vector
+        # OpenCV ellipse angle is the angle of the major axis from horizontal
+        minor_angle_rad = np.radians(angle + 90)  # Minor axis is perpendicular to major axis
+        minor_dx = np.cos(minor_angle_rad)
+        minor_dy = np.sin(minor_angle_rad)
 
-        # Apply rotation around center
-        transform_matrix = cv2.getRotationMatrix2D((center_x, center_y), rotation_angle, 1.0)
+        # Create transformation matrix that scales along the minor axis direction
+        # We'll use a more direct approach: create a matrix that stretches in the minor axis direction
 
-        # Combine with scaling (this is approximate but should work for moderate perspective)
-        transform_matrix[1, 1] *= scale_factor
+        # Translation matrices
+        # Translate ellipse center to origin
+        T_to_origin = np.array([[1, 0, -center_x],
+                               [0, 1, -center_y],
+                               [0, 0, 1]], dtype=np.float32)
 
-        return transform_matrix
+        # Translate to center of corrected target output (800x800)
+        # This ensures compatibility with the overall system architecture
+        output_center_x = self.corrected_target_size[0] / 2  # 400 for 800x800 output
+        output_center_y = self.corrected_target_size[1] / 2  # 400 for 800x800 output
+        T_to_output_center = np.array([[1, 0, output_center_x],
+                                      [0, 1, output_center_y],
+                                      [0, 0, 1]], dtype=np.float32)
+
+        # Rotation to align minor axis with Y-axis
+        rotation_angle = np.radians(angle + 90)  # Rotate so minor axis aligns with Y
+        cos_r = np.cos(-rotation_angle)  # Negative to rotate minor axis to Y
+        sin_r = np.sin(-rotation_angle)
+
+        R_align = np.array([[cos_r, -sin_r, 0],
+                           [sin_r, cos_r, 0],
+                           [0, 0, 1]], dtype=np.float32)
+
+        # Scale matrix - stretch along Y (which is now the minor axis direction)
+        S = np.array([[1, 0, 0],
+                      [0, scale_factor, 0],
+                      [0, 0, 1]], dtype=np.float32)
+
+        # Rotation back to original orientation
+        R_back = np.array([[cos_r, sin_r, 0],
+                          [-sin_r, cos_r, 0],
+                          [0, 0, 1]], dtype=np.float32)
+
+        # Combine all transformations: T_to_output_center * R_back * S * R_align * T_to_origin
+        combined_matrix = T_to_output_center @ R_back @ S @ R_align @ T_to_origin
+
+        # Extract the 2x3 affine matrix (remove the last row)
+        affine_matrix = combined_matrix[:2, :].astype(np.float32)
+
+        # Add debug information
+        if self.debug_mode:
+            print(f"Ellipse: center=({center_x:.1f}, {center_y:.1f}), axes=({major_axis:.1f}, {minor_axis:.1f}), angle={angle:.1f}°")
+            print(f"Scale factor: {scale_factor:.3f}")
+            print(f"Minor axis direction: ({minor_dx:.3f}, {minor_dy:.3f})")
+            print(f"Affine matrix:\n{affine_matrix}")
+            print(f"T_to_origin:\n{T_to_origin}")
+            print(f"R_align:\n{R_align}")
+            print(f"S (scale):\n{S}")
+            print(f"R_back:\n{R_back}")
+            print(f"T_to_output_center:\n{T_to_output_center}")
+
+        return affine_matrix
 
     def detect_rectangular_target(self, frame):
         """
@@ -815,6 +989,49 @@ class TargetDetector:
 
         return (int(new_x), int(new_y), int(new_radius))
 
+    def _transform_coordinates_to_corrected(self, circle_data):
+        """
+        Transform coordinates from original frame to perspective-corrected frame
+        This is the inverse of _transform_coordinates_back
+        """
+        if circle_data is None or self.perspective_matrix is None:
+            return circle_data
+
+        x, y, radius = circle_data
+
+        try:
+            if self.perspective_matrix.shape == (2, 3):
+                # Affine transformation
+                # Add homogeneous coordinate
+                point = np.array([x, y, 1])
+                transformed_point = self.perspective_matrix @ point
+                new_x, new_y = transformed_point[0], transformed_point[1]
+
+                # For affine transformation, use simpler radius scaling
+                scale_factor = np.sqrt(abs(np.linalg.det(self.perspective_matrix[:2, :2])))
+                new_radius = radius * scale_factor
+
+            elif self.perspective_matrix.shape == (3, 3):
+                # Perspective transformation
+                # Transform center point to corrected coordinates
+                point = np.array([[x, y]], dtype=np.float32).reshape(-1, 1, 2)
+                transformed_point = cv2.perspectiveTransform(point, self.perspective_matrix)
+                new_x, new_y = transformed_point[0][0]
+
+                # Scale radius approximately
+                scale_factor = np.sqrt(abs(np.linalg.det(self.perspective_matrix)))
+                new_radius = radius * scale_factor
+
+            else:
+                # Unsupported matrix type
+                return circle_data
+
+            return (int(new_x), int(new_y), int(new_radius))
+
+        except (np.linalg.LinAlgError, cv2.error):
+            # If transformation fails, return original coordinates
+            return circle_data
+
     def detect_enhanced_target(self, frame):
         """
         Enhanced target detection using edge detection and contours
@@ -986,8 +1203,8 @@ class TargetDetector:
             # Update detection timestamp
             self.last_detection_time = time.time()
 
-            # Clear debug frames for fresh detection
-            if self.debug_mode:
+            # Clear debug frames for fresh detection (but not during calibration mode)
+            if self.debug_mode and not self.calibration_mode:
                 self.corner_debug_frame = None
                 self.circle_debug_frame = None
 
@@ -1069,21 +1286,38 @@ class TargetDetector:
 
         return stable_inner  # Return inner circle as main target
 
-    def draw_target_overlay(self, frame, target_info=None):
+    def draw_target_overlay(self, frame, target_info=None, frame_is_corrected=False):
         """
         Draw target detection overlay on frame - both inner and outer circles
         Uses cached results for performance
+
+        Args:
+            frame: The frame to draw on
+            target_info: Pre-computed target info (optional)
+            frame_is_corrected: True if frame is already perspective-corrected
         """
         if not self.detection_enabled:
             return frame
 
         # Use provided target info, cached result, or detect new
         if target_info is None:
-            # Try using cached result first to avoid unnecessary detection
-            if self.cached_inner_result is not None:
-                target_info = self.cached_inner_result
+            if frame_is_corrected:
+                # For corrected frames, use cached detection results but transform coordinates
+                # This maintains the caching system while working on corrected frames
+                if self.cached_inner_result is not None:
+                    # Transform cached coordinates to corrected frame space
+                    target_info = self._transform_coordinates_to_corrected(self.cached_inner_result)
+                else:
+                    # No cached result available, run detection on original frame
+                    # This will populate the cache for subsequent frames
+                    target_info = None  # Will trigger overlay without detection
             else:
-                target_info = self.detect_target(frame)
+                # For original frames, use normal detection with perspective correction
+                # Try using cached result first to avoid unnecessary detection
+                if self.cached_inner_result is not None:
+                    target_info = self.cached_inner_result
+                else:
+                    target_info = self.detect_target(frame)
 
         # Draw inner circle (main target)
         if target_info is not None:
@@ -1126,8 +1360,13 @@ class TargetDetector:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, inner_color, 1)
 
         # Draw outer circle
-        if self.outer_circle is not None:
-            ox, oy, oradius = self.outer_circle
+        outer_circle_info = self.outer_circle
+        if frame_is_corrected and outer_circle_info is not None:
+            # Transform outer circle coordinates to corrected frame space
+            outer_circle_info = self._transform_coordinates_to_corrected(outer_circle_info)
+
+        if outer_circle_info is not None:
+            ox, oy, oradius = outer_circle_info
 
             # Color based on outer confidence
             if self.outer_confidence > 0.5:
@@ -1261,24 +1500,42 @@ class TargetDetector:
         self.debug_mode = enabled
 
     def set_debug_type(self, debug_type):
-        """Set debug visualization type: 'combined', 'corners', 'circles'"""
-        if debug_type in ["combined", "corners", "circles"]:
+        """Set debug visualization type: 'combined', 'perspective', 'circles'"""
+        if debug_type in ["combined", "perspective", "circles"]:
+            # Clear existing debug frames when changing type to ensure fresh view
+            self.corner_debug_frame = None
+            self.circle_debug_frame = None
+            self.debug_frame = None
             self.debug_type = debug_type
             return True
         return False
 
-    def get_debug_frame(self):
-        """Get the current debug frame based on debug type"""
-        if self.debug_type == "corners":
+    def get_debug_frame(self, debug_type=None):
+        """Get the current debug frame based on debug type
+
+        Args:
+            debug_type: Override debug type ('combined', 'perspective', 'circles', 'corrected')
+                       If None, uses self.debug_type
+        """
+        if debug_type is None:
+            debug_type = self.debug_type
+
+        if debug_type == "perspective":
             return self.corner_debug_frame
-        elif self.debug_type == "circles":
+        elif debug_type == "circles":
             return self.circle_debug_frame
-        else:  # combined
+        elif debug_type == "corrected":
+            return self.get_corrected_debug_frame()
+        else:  # combined or fallback
             return self.debug_frame
 
-    def get_debug_frame_jpeg(self):
-        """Get debug frame as JPEG bytes for streaming"""
-        debug_frame = self.get_debug_frame()
+    def get_debug_frame_jpeg(self, debug_type='combined'):
+        """Get debug frame as JPEG bytes for streaming
+
+        Args:
+            debug_type: Type of debug frame ('combined', 'perspective', 'circles', 'corrected')
+        """
+        debug_frame = self.get_debug_frame(debug_type)
         if debug_frame is not None:
             _, buffer = cv2.imencode('.jpg', debug_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             return buffer.tobytes()
@@ -1289,17 +1546,38 @@ class TargetDetector:
         if not self.debug_mode:
             return None
 
-        # Generate corner detection debug frame
-        self.detect_rectangular_target(frame)
+        # During calibration mode, preserve existing debug frames to prevent shuffling
+        if self.calibration_mode:
+            # Only create debug frames if they don't exist
+            if self.debug_type == "perspective" and self.corner_debug_frame is None:
+                self.detect_ellipse_perspective(frame)
+            elif self.debug_type == "circles" and self.circle_debug_frame is None:
+                self.detect_black_circle_improved(frame)
+            elif self.debug_type == "combined":
+                # For combined mode, ensure both frames exist
+                if self.corner_debug_frame is None:
+                    self.detect_ellipse_perspective(frame)
+                if self.circle_debug_frame is None:
+                    self.detect_black_circle_improved(frame)
+                self._create_combined_debug_frame(frame)
+        else:
+            # Normal mode - regenerate debug frames
+            if self.debug_type in ["combined", "perspective"]:
+                self.detect_rectangular_target(frame)
+                self.detect_ellipse_perspective(frame)
 
-        # Generate circle detection debug frame
-        self.detect_black_circle_improved(frame)
+            if self.debug_type in ["combined", "circles"]:
+                self.detect_black_circle_improved(frame)
 
-        # Create combined debug frame if needed
-        if self.debug_type == "combined":
-            self._create_combined_debug_frame(frame)
+            # Create combined debug frame if needed
+            if self.debug_type == "combined":
+                self._create_combined_debug_frame(frame)
 
         return self.get_debug_frame()
+
+    def get_corrected_debug_frame(self):
+        """Get perspective-corrected frame for debugging"""
+        return self.corrected_debug_frame
 
     def _create_combined_debug_frame(self, frame):
         """Create a combined debug frame showing both corner and circle detection"""
@@ -1477,3 +1755,7 @@ class TargetDetector:
             scaled_matrix[1, 2] *= scale_y
 
         return scaled_matrix
+
+    def get_perspective_matrix(self):
+        """Get the current perspective matrix for main stream correction"""
+        return self.perspective_matrix
