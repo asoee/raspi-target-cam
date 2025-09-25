@@ -1,0 +1,15 @@
+camera_resolution:
+- 1944
+- 2592
+notes: Perspective calibration for fixed camera installation
+perspective_matrix:
+- - 1.0291038751602173
+  - 0.026758255437016487
+  - -62.9676513671875
+- - 0.026758292689919472
+  - 1.024601697921753
+  - -57.892822265625
+- - 0.0
+  - 0.0
+  - 1.0
+timestamp: 1758784035.7024372

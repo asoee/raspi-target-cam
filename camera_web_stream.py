@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 from target_detection import TargetDetector
+from perspective import Perspective
 
 
 class CameraController:
@@ -64,6 +65,7 @@ class CameraController:
         self.target_detector = TargetDetector()
 
         # Perspective correction for main stream
+        self.perspective = Perspective()  # Own perspective correction instance
         self.perspective_correction_enabled = False
 
     def start_capture(self):
@@ -110,6 +112,8 @@ class CameraController:
                 print(f"Video properties: {width}x{height} @ {fps:.1f} FPS, {frame_count} frames")
 
             self.running = True
+            # Load calibration in perspective instance
+            self.perspective.load_calibration()
             threading.Thread(target=self._capture_loop, daemon=True).start()
             return True
         except Exception as e:
@@ -210,28 +214,20 @@ class CameraController:
             frame = self._rotate_frame(frame, self.rotation)
 
         # Handle perspective correction and target detection together
-        if self.perspective_correction_enabled:
-            # Get the perspective matrix from target detector
-            perspective_matrix = self.target_detector.get_perspective_matrix()
-            if perspective_matrix is not None:
-                # Apply perspective correction to the frame maintaining original size
-                corrected_frame = self.target_detector.apply_perspective_correction(
-                    frame, perspective_matrix, self.target_detector.corrected_target_size
-                )
-                if corrected_frame is not None:
-                    frame = corrected_frame
-                    # For perspective-corrected streams, detect targets on the corrected frame
-                    # This ensures target overlays are accurate for the corrected view
-                    frame = self.target_detector.draw_target_overlay(frame, frame_is_corrected=True)
-                else:
-                    # Perspective correction failed, use original frame with target overlay
-                    frame = self.target_detector.draw_target_overlay(frame)
+        if self.perspective_correction_enabled and False:
+            corrected_frame = self.perspective.apply_perspective_correction(frame)
+            if corrected_frame is not None:
+                frame = corrected_frame
+                # For perspective-corrected streams, detect targets on the corrected frame
+                # This ensures target overlays are accurate for the corrected view
+                frame = self.target_detector.draw_target_overlay(frame, frame_is_corrected=True)
             else:
-                # No perspective matrix available, use original frame with target overlay
+                # Perspective correction failed, use original frame with target overlay
                 frame = self.target_detector.draw_target_overlay(frame)
         else:
             # No perspective correction, use original frame with target overlay
-            frame = self.target_detector.draw_target_overlay(frame)
+            pass
+            # frame = self.target_detector.draw_target_overlay(frame)
 
         # Skip other transformations if no zoom or pan
         if self.zoom == 1.0 and self.pan_x == 0 and self.pan_y == 0:
@@ -396,14 +392,11 @@ class CameraController:
 
                 # For corrected debug type, provide the perspective-corrected frame
                 if debug_type == 'corrected' and self.perspective_correction_enabled:
-                    perspective_matrix = self.target_detector.get_perspective_matrix()
-                    if perspective_matrix is not None:
-                        corrected_frame = self.target_detector.apply_perspective_correction(
-                            self.frame, perspective_matrix, (self.frame.shape[1], self.frame.shape[0])
-                        )
-                        if corrected_frame is not None:
-                            # Temporarily store corrected frame for debug access
-                            self.target_detector.corrected_debug_frame = corrected_frame
+                    # Fallback to generic perspective correction
+                    corrected_frame = self.perspective.apply_perspective_correction(self.frame)
+                    if corrected_frame is not None:
+                        # Temporarily store corrected frame for debug access
+                        self.target_detector.corrected_debug_frame = corrected_frame
 
         return self.target_detector.get_debug_frame_jpeg(debug_type)
 
@@ -423,9 +416,15 @@ class CameraController:
         """Perform perspective calibration using current frame"""
         with self.lock:
             if self.frame is not None:
-                return self.target_detector.calibrate_perspective(self.frame)
+                # Use perspective.py directly for calibration - it handles all matrix storage internally
+                success, message = self.perspective.calibrate_perspective(self.frame)
+
+                # Debug frame handling can be added later if needed
+
+                return success, message
             else:
                 return False, "No frame available for calibration"
+
 
     def get_available_sources(self):
         """Get list of available cameras and video files"""
@@ -528,6 +527,7 @@ class CameraController:
             'source_type': self.source_type,
             'current_source': self.camera_index if self.source_type == "camera" else self.video_file,
             'perspective_correction_enabled': self.perspective_correction_enabled,
+            'perspective_correction_method': 'ellipse-to-circle' if self.perspective.saved_ellipse_data else 'matrix-based',
             'is_video_mode': self.source_type == "video",
             'native_video_resolution': self.native_video_resolution,
             'native_video_fps': self.native_video_fps
@@ -769,9 +769,9 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 response = {'success': success, 'message': message}
 
             elif path == '/api/save_calibration':
-                # Get current camera resolution
+                # Get current camera resolution and save calibration
                 camera_resolution = camera_controller.resolution
-                success, message = camera_controller.target_detector.save_perspective_calibration(camera_resolution)
+                success, message = camera_controller.perspective.save_calibration(camera_resolution)
                 response = {'success': success, 'message': message}
 
             elif path == '/api/calibration_mode':
