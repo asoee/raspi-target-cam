@@ -263,7 +263,93 @@ class TargetDetector:
 
             return best_outer_circle
 
-        return None
+    def detect_outer_circle_ellipse_based(self, frame, inner_circle=None):
+        """
+        Detect outer ring using ellipse fitting on contours (inspired by perspective detection)
+        This method handles partial occlusion better than HoughCircles
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = frame.shape[:2]
+        scale_factor = max(w / 640, h / 480)
+        
+        # Edge detection with parameters similar to perspective detection
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
+        
+        # Find contours
+        contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Filter for ring-like contours that could be the outer ring
+        min_area = int(5000 * scale_factor * scale_factor)  # Larger minimum area for outer ring
+        min_circularity = 0.2  # More lenient for partially occluded rings
+        
+        ring_contours = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area > min_area:
+                perimeter = cv2.arcLength(contour, True)
+                if perimeter > 0:
+                    circularity = 4 * np.pi * area / (perimeter * perimeter)
+                    if circularity > min_circularity:
+                        ring_contours.append(contour)
+        
+        if not ring_contours:
+            return None
+            
+        best_circle = None
+        best_score = 0
+        
+        for contour in ring_contours:
+            if len(contour) < 5:  # Need at least 5 points to fit ellipse
+                continue
+                
+            try:
+                # Fit ellipse to contour
+                ellipse = cv2.fitEllipse(contour)
+                (center_x, center_y), (minor_axis, major_axis), angle = ellipse
+                
+                # Convert ellipse to approximate circle (use average of axes)
+                avg_radius = (minor_axis + major_axis) / 4.0  # Divide by 4 because axes are diameters
+                
+                # Check if this could be an outer ring
+                aspect_ratio = max(major_axis, minor_axis) / min(major_axis, minor_axis)
+                
+                # More lenient aspect ratio for partially occluded outer ring
+                if aspect_ratio > 3.0:  # Too stretched, probably not a ring
+                    continue
+                
+                # If we have inner circle, check relationship
+                if inner_circle is not None:
+                    inner_x, inner_y, inner_r = inner_circle
+                    distance_between_centers = np.sqrt((center_x - inner_x)**2 + (center_y - inner_y)**2)
+                    
+                    max_center_distance = int(50 * scale_factor)  # More lenient for ellipse fitting
+                    min_radius_diff = int(15 * scale_factor)
+                    
+                    # Check if outer and larger
+                    if distance_between_centers > max_center_distance or avg_radius <= inner_r + min_radius_diff:
+                        continue
+                
+                # Score based on size, position, and shape quality
+                area = cv2.contourArea(contour)
+                size_score = area / (w * h)  # Prefer larger rings
+                
+                # Prefer rings closer to center
+                center_score = 1.0 - (abs(center_x - w/2) + abs(center_y - h/2)) / (w + h)
+                
+                # Prefer more circular shapes (penalize high aspect ratios)
+                shape_score = 1.0 / aspect_ratio
+                
+                score = size_score * 0.4 + center_score * 0.3 + shape_score * 0.3
+                
+                if score > best_score:
+                    best_score = score
+                    best_circle = (int(center_x), int(center_y), int(avg_radius))
+                    
+            except cv2.error:
+                continue
+                
+        return best_circle
 
     def _calculate_edge_score(self, edges, center, radius):
         """
@@ -856,8 +942,12 @@ class TargetDetector:
                 stable_inner = self.stable_detection
                 self.cached_inner_result = stable_inner
 
-            # Detect outer circle using the inner circle as reference
-            current_outer = self.detect_outer_circle(frame, stable_inner)
+            # Detect outer circle using ellipse-based method (better for partial occlusion)
+            current_outer = self.detect_outer_circle_ellipse_based(frame, stable_inner)
+            
+            # Fallback to original HoughCircles method if ellipse method fails
+            if current_outer is None:
+                current_outer = self.detect_outer_circle(frame, stable_inner)
 
             # No coordinate transformation needed since perspective correction is handled upstream
 

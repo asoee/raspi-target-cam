@@ -106,7 +106,7 @@ class CameraController:
 
         # Perspective correction for main stream
         self.perspective = Perspective()  # Own perspective correction instance
-        self.perspective_correction_enabled = False
+        self.perspective_correction_enabled = True
         
         # Test frame generation
         self.test_frame_counter = 0
@@ -437,16 +437,21 @@ class CameraController:
         if self.perspective_correction_enabled:
             corrected_frame = self.perspective.apply_perspective_correction(frame)
             if corrected_frame is not None:
-                frame = corrected_frame
-                # For perspective-corrected streams, detect targets on the corrected frame
-                # This ensures target overlays are accurate for the corrected view
-                frame = self.target_detector.draw_target_overlay(frame, frame_is_corrected=True)
+                # Run target detection on the corrected frame for better accuracy
+                # This ensures detection works on the geometrically corrected image
+                frame = self.target_detector.draw_target_overlay(corrected_frame, 
+                                                               target_info=self.target_detector.detect_target(corrected_frame), 
+                                                               frame_is_corrected=True)
             else:
-                # Perspective correction failed, use original frame with target overlay
-                frame = self.target_detector.draw_target_overlay(frame)
+                # Perspective correction failed, run detection on original frame
+                frame = self.target_detector.draw_target_overlay(frame, 
+                                                               target_info=self.target_detector.detect_target(frame), 
+                                                               frame_is_corrected=False)
         else:
-            # No perspective correction, use original frame with target overlay
-            frame = self.target_detector.draw_target_overlay(frame)
+            # No perspective correction, run target detection on original frame
+            frame = self.target_detector.draw_target_overlay(frame, 
+                                                           target_info=self.target_detector.detect_target(frame), 
+                                                           frame_is_corrected=False)
 
         # Skip other transformations if no zoom or pan
         if self.zoom == 1.0 and self.pan_x == 0 and self.pan_y == 0:
