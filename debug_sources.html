@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Debug Sources Loading</title>
+</head>
+<body>
+    <h1>Debug Sources Loading</h1>
+    <select id="videoSource">
+        <option value="">Loading sources...</option>
+    </select>
+    <div id="status"></div>
+    
+    <script>
+        function updateStatus(msg) {
+            document.getElementById('status').innerHTML += '<p>' + msg + '</p>';
+            console.log(msg);
+        }
+        
+        function loadAvailableSources() {
+            updateStatus('Starting to load sources...');
+            
+            fetch('/api/sources')
+                .then(response => {
+                    updateStatus('Received response from /api/sources');
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(sources => {
+                    updateStatus('Successfully parsed JSON response');
+                    updateStatus('Sources: ' + JSON.stringify(sources, null, 2));
+                    
+                    const sourceSelect = document.getElementById('videoSource');
+                    sourceSelect.innerHTML = '';
+
+                    // Add cameras
+                    if (sources.cameras && sources.cameras.length > 0) {
+                        updateStatus('Adding ' + sources.cameras.length + ' cameras');
+                        const cameraGroup = document.createElement('optgroup');
+                        cameraGroup.label = '📷 Cameras';
+                        sources.cameras.forEach(camera => {
+                            const option = document.createElement('option');
+                            option.value = `camera|${camera.id}`;
+                            option.textContent = camera.name;
+                            cameraGroup.appendChild(option);
+                            updateStatus(`Added camera: ${camera.name} (${option.value})`);
+                        });
+                        sourceSelect.appendChild(cameraGroup);
+                    }
+
+                    // Add video files
+                    if (sources.videos && sources.videos.length > 0) {
+                        updateStatus('Adding ' + sources.videos.length + ' videos');
+                        const videoGroup = document.createElement('optgroup');
+                        videoGroup.label = '🎬 Sample Videos';
+                        sources.videos.forEach(video => {
+                            const option = document.createElement('option');
+                            option.value = `video|${video.id}`;
+                            option.textContent = video.name;
+                            videoGroup.appendChild(option);
+                            updateStatus(`Added video: ${video.name} (${option.value})`);
+                        });
+                        sourceSelect.appendChild(videoGroup);
+                    }
+
+                    if (sourceSelect.options.length === 0) {
+                        const option = document.createElement('option');
+                        option.value = '';
+                        option.textContent = 'No sources available';
+                        sourceSelect.appendChild(option);
+                        updateStatus('No sources found - added placeholder');
+                    } else {
+                        updateStatus(`Total options added: ${sourceSelect.options.length}`);
+                    }
+                })
+                .catch(error => {
+                    updateStatus('ERROR: ' + error.message);
+                    console.error('Failed to load sources:', error);
+                    document.getElementById('videoSource').innerHTML = '<option value="">Error loading sources</option>';
+                });
+        }
+        
+        // Load sources on page load
+        window.addEventListener('load', loadAvailableSources);
+    </script>
+</body>
+</html>

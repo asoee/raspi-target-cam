@@ -4,11 +4,45 @@ Unified Camera HTTP Streaming and Web Interface Server
 Combines MJPEG camera stream and web interface in a single threaded application
 """
 
+import faulthandler
+import signal
+import sys
+import os
+
+# Enable faulthandler to catch segmentation faults
+faulthandler.enable()
+
+# Also register faulthandler for specific signals
+faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True)
+
+print("🔍 Faulthandler enabled - will show traceback on segmentation fault")
+print("💡 Send SIGUSR1 signal to dump all thread stacks: kill -USR1 <pid>")
+print(f"🆔 Process ID: {os.getpid()}")
+
+def crash_handler(signum, frame):
+    """Handle crashes with detailed information"""
+    # Prevent recursive crashes
+    signal.signal(signum, signal.SIG_DFL)  # Restore default handler
+
+    # Simple crash reporting
+    try:
+        with open('/tmp/camera_crash.log', 'w') as f:
+            f.write(f"CRASH: Signal {signum}\n")
+            faulthandler.dump_traceback(file=f, all_threads=True)
+        print(f"\n💥 SEGFAULT DETECTED - Signal {signum}")
+        print("📋 Full crash details saved to /tmp/camera_crash.log")
+    except:
+        pass  # Don't let crash handler crash
+
+    os._exit(1)  # Force exit without cleanup
+
+# Register crash handler only for segfault
+signal.signal(signal.SIGSEGV, crash_handler)
+
 import cv2
 import threading
 import time
 import json
-import os
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -22,8 +56,8 @@ class CameraController:
 
     def __init__(self, camera_index=0):
         self.camera_index = camera_index
-        self.video_file = None  # For video file input
-        self.source_type = "camera"  # "camera" or "video"
+        self.video_file = "./samples/video_20250918_182102.avi"  # Default video file
+        self.source_type = "video"  # Start with video by default to avoid camera hang
         self.cap = None
         self.frame = None
         self.running = False
@@ -47,6 +81,12 @@ class CameraController:
         self.native_video_resolution = None  # Native resolution of video file
         self.native_video_fps = None  # Native FPS of video file
 
+        # Available sources (detected once at startup)
+        self.available_sources = {'cameras': [], 'videos': []}
+
+        # Detect available sources
+        self._detect_available_sources()
+
         # Playback controls
         self.paused = False
         self.step_frame = False  # Flag to advance one frame when paused
@@ -69,17 +109,44 @@ class CameraController:
         self.perspective_correction_enabled = False
 
     def start_capture(self):
-        """Initialize and start camera or video file capture"""
+        """Initialize and start camera or video file capture - SAFE VERSION"""
         try:
+            print(f"DEBUG: Initializing {self.source_type} capture...")
+            
             if self.source_type == "camera":
-                self.cap = cv2.VideoCapture(self.camera_index)
-                if not self.cap.isOpened():
-                    raise RuntimeError(f"Could not open camera {self.camera_index}")
-
-                # Set initial resolution for camera
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                print(f"DEBUG: Opening camera {self.camera_index}...")
+                
+                # Use timeout mechanism to prevent hanging
+                try:
+                    self.cap = cv2.VideoCapture(self.camera_index)
+                    
+                    # Check if opened within a reasonable time
+                    if not self.cap or not self.cap.isOpened():
+                        if self.cap:
+                            self.cap.release()
+                        raise RuntimeError(f"Could not open camera {self.camera_index}")
+                    
+                    print(f"DEBUG: Camera {self.camera_index} opened successfully")
+                    
+                    # Set camera properties safely
+                    try:
+                        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
+                        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
+                        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        print(f"DEBUG: Camera properties set")
+                    except Exception as e:
+                        print(f"WARNING: Could not set camera properties: {e}")
+                        # Continue anyway, camera might still work with default settings
+                        
+                except Exception as e:
+                    print(f"ERROR: Failed to initialize camera {self.camera_index}: {e}")
+                    if self.cap:
+                        try:
+                            self.cap.release()
+                        except:
+                            pass
+                        self.cap = None
+                    raise RuntimeError(f"Camera initialization failed: {str(e)}")
             else:  # video file
                 if not self.video_file or not os.path.exists(self.video_file):
                     raise RuntimeError(f"Video file not found: {self.video_file}")
@@ -113,7 +180,14 @@ class CameraController:
 
             self.running = True
             # Load calibration in perspective instance
-            self.perspective.load_calibration()
+            try:
+                print("DEBUG: Loading perspective calibration...")
+                self.perspective.load_calibration()
+                print("DEBUG: Perspective calibration loaded successfully")
+            except Exception as e:
+                print(f"WARNING: Failed to load perspective calibration: {e}")
+
+            print("DEBUG: Starting capture thread...")
             threading.Thread(target=self._capture_loop, daemon=True).start()
             return True
         except Exception as e:
@@ -123,56 +197,91 @@ class CameraController:
     def _capture_loop(self):
         """Continuous frame capture and processing loop"""
         while self.running:
-            # Handle pause/play logic
-            if self.paused and not self.step_frame:
-                # When paused and not stepping, serve frames from buffer
-                if self.frame_buffer and self.pause_buffer_index < len(self.frame_buffer):
-                    buffered_frame = self.frame_buffer[self.pause_buffer_index]
-                    with self.lock:
-                        self.frame = buffered_frame.copy()
-                time.sleep(0.1)  # Sleep while paused
-                continue
-
-            # Read new frame from source
-            ret, frame = self.cap.read()
-            if ret:
-                # Update current frame number for video files
-                if self.source_type == "video":
-                    self.current_frame_number = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-
-                # Apply zoom and pan transformations
-                processed_frame = self._apply_transformations(frame)
-
-                # Add to frame buffer (maintain rolling buffer)
-                self.frame_buffer.append(processed_frame.copy())
-                if len(self.frame_buffer) > self.buffer_size:
-                    self.frame_buffer.pop(0)
-
-                # Handle stepping
-                if self.step_frame:
-                    self.step_frame = False
-                    if self.paused and self._handle_frame_step():
-                        continue
-
-                # Update display frame number for normal playback
-                if not self.paused and self.source_type == "video":
-                    self.display_frame_number = self.current_frame_number
-
-                with self.lock:
-                    self.frame = processed_frame.copy()
-            else:
-                # If video file reached end, loop back to beginning
-                if self.source_type == "video":
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    self.current_frame_number = 0
-                    self.display_frame_number = 0
+            try:
+                # Check if we should stop before processing
+                if not self.running:
+                    break
+                    
+                # Safely check if capture device is available
+                if not self.cap or not self.cap.isOpened():
+                    print("WARNING: Capture device not available")
+                    time.sleep(0.1)
+                    continue
+                # Handle pause/play logic
+                if self.paused and not self.step_frame:
+                    # When paused and not stepping, serve frames from buffer
+                    if self.frame_buffer and self.pause_buffer_index < len(self.frame_buffer):
+                        buffered_frame = self.frame_buffer[self.pause_buffer_index]
+                        with self.lock:
+                            self.frame = buffered_frame.copy()
+                    time.sleep(0.1)  # Sleep while paused
                     continue
 
-            # Use appropriate sleep timing
-            if self.source_type == "video" and not self.paused:
-                time.sleep(self.video_frame_time)
-            else:
-                time.sleep(0.03)  # ~30 FPS for camera
+                # Read new frame from source
+                ret, frame = self.cap.read()
+                if ret:
+                    # Validate the frame from the source
+                    if not self._is_valid_frame(frame):
+                        print(f"WARNING: Invalid frame from source, skipping")
+                        continue
+
+                    # Update current frame number for video files
+                    if self.source_type == "video":
+                        self.current_frame_number = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+
+                    # Apply zoom and pan transformations
+                    try:
+                        processed_frame = self._apply_transformations(frame)
+
+                        # Validate processed frame
+                        if not self._is_valid_frame(processed_frame):
+                            print(f"WARNING: Transformation resulted in invalid frame")
+                            processed_frame = frame  # Use original frame
+
+                    except Exception as e:
+                        print(f"ERROR in _apply_transformations: {e}")
+                        processed_frame = frame  # Use original frame if transformation fails
+
+                    # Add to frame buffer (maintain rolling buffer)
+                    # Ensure we're adding a valid frame
+                    if self._is_valid_frame(processed_frame):
+                        self.frame_buffer.append(processed_frame.copy())
+                        if len(self.frame_buffer) > self.buffer_size:
+                            self.frame_buffer.pop(0)
+                    else:
+                        print(f"WARNING: Skipping invalid processed frame")
+
+                    # Handle stepping
+                    if self.step_frame:
+                        self.step_frame = False
+                        if self.paused and self._handle_frame_step():
+                            continue
+
+                    # Update display frame number for normal playback
+                    if not self.paused and self.source_type == "video":
+                        self.display_frame_number = self.current_frame_number
+
+                    with self.lock:
+                        self.frame = processed_frame.copy()
+                else:
+                    # If video file reached end, loop back to beginning
+                    if self.source_type == "video":
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        self.current_frame_number = 0
+                        self.display_frame_number = 0
+                        continue
+
+                # Use appropriate sleep timing
+                if self.source_type == "video" and not self.paused:
+                    time.sleep(self.video_frame_time)
+                else:
+                    time.sleep(0.03)  # ~30 FPS for camera
+
+            except Exception as e:
+                print(f"ERROR in _capture_loop: {e}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(0.1)  # Brief pause before retrying
 
     def _handle_frame_step(self):
         """
@@ -253,34 +362,109 @@ class CameraController:
 
             # Crop and resize back to original resolution
             cropped = frame[y1:y2, x1:x2]
-            frame = cv2.resize(cropped, (w, h))
+
+            # Validate cropped region
+            if not self._is_valid_frame(cropped):
+                print(f"WARNING: Invalid cropped region, skipping resize")
+                return frame
+
+            if cropped.shape[0] <= 0 or cropped.shape[1] <= 0:
+                print(f"WARNING: Empty cropped region {cropped.shape}, skipping resize")
+                return frame
+
+            if w <= 0 or h <= 0:
+                print(f"WARNING: Invalid resize dimensions {w}x{h}")
+                return frame
+
+            try:
+                frame = cv2.resize(cropped, (w, h))
+            except Exception as e:
+                print(f"ERROR in cv2.resize: {e}")
+                return frame  # Return original if resize fails
 
         return frame
 
     def _rotate_frame(self, frame, degrees):
         """Rotate frame by specified degrees clockwise"""
-        if degrees == 0:
+        # Validate input frame
+        if not self._is_valid_frame(frame):
+            print(f"WARNING: Invalid frame for rotation, returning original")
             return frame
-        elif degrees == 90:
-            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        elif degrees == 180:
-            return cv2.rotate(frame, cv2.ROTATE_180)
-        elif degrees == 270:
-            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        else:
-            # For arbitrary angles, use affine transformation
-            h, w = frame.shape[:2]
-            center = (w // 2, h // 2)
-            rotation_matrix = cv2.getRotationMatrix2D(center, -degrees, 1.0)
-            return cv2.warpAffine(frame, rotation_matrix, (w, h))
+
+        try:
+            if degrees == 0:
+                return frame
+            elif degrees == 90:
+                return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif degrees == 180:
+                return cv2.rotate(frame, cv2.ROTATE_180)
+            elif degrees == 270:
+                return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            else:
+                # For arbitrary angles, use affine transformation
+                h, w = frame.shape[:2]
+                if h <= 0 or w <= 0:
+                    print(f"WARNING: Invalid frame dimensions {w}x{h} for rotation")
+                    return frame
+
+                center = (w // 2, h // 2)
+                rotation_matrix = cv2.getRotationMatrix2D(center, -degrees, 1.0)
+
+                # Validate rotation matrix
+                if rotation_matrix is None or rotation_matrix.shape != (2, 3):
+                    print(f"WARNING: Invalid rotation matrix generated")
+                    return frame
+
+                return cv2.warpAffine(frame, rotation_matrix, (w, h))
+        except Exception as e:
+            print(f"ERROR in _rotate_frame: {e}")
+            return frame  # Return original frame on error
+
+    def _is_valid_frame(self, frame):
+        """Validate frame for OpenCV operations"""
+        if frame is None:
+            return False
+        if not hasattr(frame, 'shape') or not hasattr(frame, 'dtype'):
+            return False
+        if len(frame.shape) not in [2, 3]:  # Grayscale or color
+            return False
+        if frame.shape[0] <= 0 or frame.shape[1] <= 0:
+            return False
+        if len(frame.shape) == 3 and frame.shape[2] not in [1, 3, 4]:  # Valid channel counts
+            return False
+        if frame.size == 0:
+            return False
+        return True
 
     def get_frame_jpeg(self):
         """Get the latest frame as JPEG bytes"""
-        with self.lock:
-            if self.frame is not None:
-                _, buffer = cv2.imencode('.jpg', self.frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                return buffer.tobytes()
-        return None
+        try:
+            with self.lock:
+                if self.frame is not None:
+                    # Validate frame before OpenCV operations
+                    if not self._is_valid_frame(self.frame):
+                        print(f"WARNING: Invalid frame detected, skipping encode")
+                        return None
+
+                    # Make a copy to avoid memory issues
+                    frame_copy = self.frame.copy()
+
+                    # Ensure proper data type and layout
+                    if frame_copy.dtype != 'uint8':
+                        frame_copy = frame_copy.astype('uint8')
+
+                    # Ensure contiguous memory layout
+                    if not frame_copy.flags['C_CONTIGUOUS']:
+                        frame_copy = frame_copy.copy()
+
+                    _, buffer = cv2.imencode('.jpg', frame_copy, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    return buffer.tobytes()
+            return None
+        except Exception as e:
+            print(f"ERROR in get_frame_jpeg: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def set_resolution(self, width, height):
         """Change camera resolution (only works for cameras, not video files)"""
@@ -414,85 +598,184 @@ class CameraController:
 
     def calibrate_perspective(self):
         """Perform perspective calibration using current frame"""
-        with self.lock:
-            if self.frame is not None:
-                # Use perspective.py directly for calibration - it handles all matrix storage internally
-                success, message = self.perspective.calibrate_perspective(self.frame)
+        try:
+            with self.lock:
+                if self.frame is not None:
+                    # Validate frame before calibration
+                    if not self._is_valid_frame(self.frame):
+                        return False, "Current frame is invalid for calibration"
 
-                # Debug frame handling can be added later if needed
+                    print("DEBUG: Starting perspective calibration...")
+                    print(f"DEBUG: Frame shape: {self.frame.shape}, dtype: {self.frame.dtype}")
 
-                return success, message
-            else:
-                return False, "No frame available for calibration"
+                    # Make a copy to ensure memory safety
+                    frame_copy = self.frame.copy()
+
+                    # Ensure proper data type for calibration
+                    if frame_copy.dtype != 'uint8':
+                        frame_copy = frame_copy.astype('uint8')
+
+                    # Use perspective.py directly for calibration - it handles all matrix storage internally
+                    success, message = self.perspective.calibrate_perspective(frame_copy)
+                    print(f"DEBUG: Calibration result: {success}, {message}")
+
+                    # Debug frame handling can be added later if needed
+
+                    return success, message
+                else:
+                    return False, "No frame available for calibration"
+        except Exception as e:
+            print(f"ERROR in calibrate_perspective: {e}")
+            import traceback
+            traceback.print_exc()
+            return False, f"Calibration failed with error: {str(e)}"
 
 
-    def get_available_sources(self):
-        """Get list of available cameras and video files"""
-        sources = {
-            'cameras': [],
-            'videos': []
-        }
+    def _detect_available_sources(self):
+        """Detect available cameras and video files at startup"""
+        print("DEBUG: Detecting available sources...")
 
         # Check for available cameras (0-5)
+        camera_count = 0
         for i in range(6):
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                sources['cameras'].append({
-                    'id': f'camera_{i}',
-                    'name': f'Camera {i}',
-                    'index': i
-                })
+            try:
+                cap = cv2.VideoCapture(i)
+                if cap.isOpened():
+                    self.available_sources['cameras'].append({
+                        'id': f'camera_{i}',
+                        'name': f'Camera {i}',
+                        'index': i
+                    })
+                    camera_count += 1
                 cap.release()
+            except Exception as e:
+                print(f"DEBUG: Error checking camera {i}: {e}")
 
         # Check for video files in samples directory
+        video_count = 0
         if os.path.exists(self.samples_dir):
-            for filename in os.listdir(self.samples_dir):
-                if filename.lower().endswith(('.avi', '.mp4', '.mov', '.mkv', '.wmv')):
-                    filepath = os.path.join(self.samples_dir, filename)
-                    sources['videos'].append({
-                        'id': f'video_{filename}',
-                        'name': filename,
-                        'path': filepath
-                    })
+            try:
+                for filename in os.listdir(self.samples_dir):
+                    if filename.lower().endswith(('.avi', '.mp4', '.mov', '.mkv', '.wmv')):
+                        filepath = os.path.join(self.samples_dir, filename)
+                        self.available_sources['videos'].append({
+                            'id': f'video_{filename}',
+                            'name': filename,
+                            'path': filepath
+                        })
+                        video_count += 1
+            except Exception as e:
+                print(f"DEBUG: Error scanning video directory: {e}")
 
-        return sources
+        print(f"DEBUG: Found {camera_count} cameras and {video_count} video files")
+
+    def get_available_sources(self):
+        """Get list of available cameras and video files (cached)"""
+        return self.available_sources
 
     def set_video_source(self, source_type, source_id):
-        """Change video source (camera or video file)"""
+        """Change video source (camera or video file) - SAFE VERSION"""
         try:
-            # Stop current capture
-            self.stop()
-            time.sleep(0.5)  # Wait for capture loop to stop
-
+            print(f"DEBUG: Requesting source change to {source_type}: {source_id}")
+            
+            # For camera switching, use a safer approach that avoids OpenCV crashes
             if source_type == "camera":
-                # Extract camera index from source_id like "camera_0"
+                camera_index = int(source_id.split('_')[1])
+                
+                # Test the camera first before switching
+                print(f"DEBUG: Testing camera {camera_index}...")
+                test_cap = None
+                try:
+                    test_cap = cv2.VideoCapture(camera_index)
+                    if not test_cap.isOpened():
+                        if test_cap:
+                            test_cap.release()
+                        return False, f"Camera {camera_index} is not available"
+                    
+                    # Try to read a frame to ensure it works
+                    ret, frame = test_cap.read()
+                    if not ret or frame is None:
+                        test_cap.release()
+                        return False, f"Camera {camera_index} cannot capture frames"
+                    
+                    test_cap.release()
+                    print(f"DEBUG: Camera {camera_index} test successful")
+                    
+                except Exception as e:
+                    if test_cap:
+                        try:
+                            test_cap.release()
+                        except:
+                            pass
+                    print(f"ERROR: Camera {camera_index} test failed: {e}")
+                    return False, f"Camera {camera_index} test failed: {str(e)}"
+            
+            # Stop current capture
+            print("DEBUG: Stopping current capture...")
+            self.stop()
+            
+            # Wait longer for everything to settle
+            time.sleep(1.0)
+            
+            # Reset all state
+            self.paused = False
+            self.step_frame = False
+            self.current_frame_number = 0
+            self.display_frame_number = 0
+            self.total_frames = 0
+            
+            # Configure new source
+            if source_type == "camera":
                 camera_index = int(source_id.split('_')[1])
                 self.camera_index = camera_index
                 self.source_type = "camera"
                 self.video_file = None
-                # Clear video-specific properties
                 self.native_video_resolution = None
                 self.native_video_fps = None
+                print(f"DEBUG: Configured for camera {camera_index}")
+                
             elif source_type == "video":
-                # Extract filename from source_id like "video_filename.avi"
                 filename = source_id.replace('video_', '', 1)
                 video_path = os.path.join(self.samples_dir, filename)
                 if not os.path.exists(video_path):
                     return False, f"Video file not found: {filename}"
-
+                
                 self.source_type = "video"
                 self.video_file = video_path
+                print(f"DEBUG: Configured for video file {video_path}")
+                
             else:
                 return False, f"Invalid source type: {source_type}"
-
-            # Start capture with new source
-            if self.start_capture():
-                return True, f"Source changed to {source_type}: {source_id}"
+            
+            # Start new capture
+            print("DEBUG: Starting new capture...")
+            success = self.start_capture()
+            
+            if success:
+                print("DEBUG: Source change successful")
+                return True, f"Successfully changed to {source_type}: {source_id}"
             else:
-                return False, f"Failed to start capture with new source"
-
+                print("DEBUG: Source change failed - reverting to video")
+                # Fallback to a working video file
+                self.source_type = "video"
+                self.video_file = "./samples/video_20250918_182102.avi"
+                self.start_capture()
+                return False, f"Failed to start {source_type}, reverted to video"
+                
         except Exception as e:
-            return False, f"Error changing source: {str(e)}"
+            print(f"CRITICAL ERROR in set_video_source: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Emergency fallback
+            try:
+                self.source_type = "video"
+                self.video_file = "./samples/video_20250918_182102.avi"
+                self.start_capture()
+            except:
+                pass
+                
+            return False, f"Critical error during source change: {str(e)}"
 
     def get_status(self):
         """Get current camera status"""
@@ -546,8 +829,23 @@ class CameraController:
     def stop(self):
         """Stop camera capture"""
         self.running = False
+        
+        # Simple wait for capture loop to notice running=False
+        time.sleep(0.5)
+        
+        # Release capture device
         if self.cap:
-            self.cap.release()
+            try:
+                self.cap.release()
+                self.cap = None
+            except Exception as e:
+                print(f"WARNING: Error releasing capture device: {e}")
+        
+        # Clear frame buffer
+        try:
+            self.frame_buffer.clear()
+        except:
+            pass
 
 
 class StreamingHandler(BaseHTTPRequestHandler):
@@ -555,58 +853,88 @@ class StreamingHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         """Handle GET requests"""
-        parsed_path = urlparse(self.path)
-        path = parsed_path.path
+        try:
+            parsed_path = urlparse(self.path)
+            path = parsed_path.path
 
-        if path == '/stream.mjpg':
-            self._serve_mjpeg_stream()
-        elif path == '/debug.mjpg':
-            # Parse debug type parameter
-            query_params = parse_qs(parsed_path.query)
-            debug_type = query_params.get('type', ['combined'])[0]  # Default to 'combined'
-            self._serve_debug_stream(debug_type)
-        elif path == '/' or path == '/index.html':
-            self._serve_file('camera_interface.html')
-        elif path == '/api/status':
-            self._serve_api_status()
-        elif path == '/api/sources':
-            self._serve_api_sources()
-        elif path.endswith('.html') or path.endswith('.css') or path.endswith('.js'):
-            self._serve_file(path[1:])  # Remove leading slash
-        else:
-            self.send_error(404)
+            if path == '/stream.mjpg':
+                self._serve_mjpeg_stream()
+            elif path == '/debug.mjpg':
+                # Parse debug type parameter
+                query_params = parse_qs(parsed_path.query)
+                debug_type = query_params.get('type', ['combined'])[0]  # Default to 'combined'
+                self._serve_debug_stream(debug_type)
+            elif path == '/' or path == '/index.html':
+                self._serve_file('camera_interface.html')
+            elif path == '/api/status':
+                self._serve_api_status()
+            elif path == '/api/sources':
+                self._serve_api_sources()
+            elif path.endswith('.html') or path.endswith('.css') or path.endswith('.js'):
+                self._serve_file(path[1:])  # Remove leading slash
+            else:
+                self.send_error(404)
+        except Exception as e:
+            print(f"ERROR in do_GET({self.path}): {e}")
+            import traceback
+            traceback.print_exc()
+            try:
+                self.send_error(500)
+            except:
+                pass  # Connection might already be closed
 
     def do_POST(self):
         """Handle POST requests for API calls"""
-        parsed_path = urlparse(self.path)
-        path = parsed_path.path
+        try:
+            parsed_path = urlparse(self.path)
+            path = parsed_path.path
 
-        if path.startswith('/api/'):
-            self._handle_api_request(path)
-        else:
-            self.send_error(404)
+            if path.startswith('/api/'):
+                self._handle_api_request(path)
+            else:
+                self.send_error(404)
+        except Exception as e:
+            print(f"ERROR in do_POST({self.path}): {e}")
+            import traceback
+            traceback.print_exc()
+            try:
+                self.send_error(500)
+            except:
+                pass  # Connection might already be closed
 
     def _serve_mjpeg_stream(self):
         """Serve MJPEG video stream"""
-        self.send_response(200)
-        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
-        self.send_header('Cache-Control', 'no-cache')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-
+        global camera_controller
         try:
+            self.send_response(200)
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+
+            frame_count = 0
             while True:
-                frame_data = camera_controller.get_frame_jpeg()
-                if frame_data:
-                    self.wfile.write(b'--frame\r\n')
-                    self.send_header('Content-Type', 'image/jpeg')
-                    self.send_header('Content-Length', str(len(frame_data)))
-                    self.end_headers()
-                    self.wfile.write(frame_data)
-                    self.wfile.write(b'\r\n')
-                time.sleep(0.03)
+                try:
+                    frame_data = camera_controller.get_frame_jpeg()
+                    if frame_data:
+                        self.wfile.write(b'--frame\r\n')
+                        self.send_header('Content-Type', 'image/jpeg')
+                        self.send_header('Content-Length', str(len(frame_data)))
+                        self.end_headers()
+                        self.wfile.write(frame_data)
+                        self.wfile.write(b'\r\n')
+
+                        frame_count += 1
+                        if frame_count % 100 == 0:  # Log every 100 frames
+                            print(f"DEBUG: Served {frame_count} stream frames")
+                    time.sleep(0.03)
+                except Exception as e:
+                    print(f"ERROR in stream frame delivery: {e}")
+                    break  # Exit the streaming loop on error
         except Exception as e:
-            print(f"Stream client disconnected: {e}")
+            print(f"ERROR in _serve_mjpeg_stream: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _serve_debug_stream(self, debug_type='combined'):
         """Serve MJPEG debug stream for specific debug type
@@ -614,6 +942,7 @@ class StreamingHandler(BaseHTTPRequestHandler):
         Args:
             debug_type: Type of debug stream ('combined', 'perspective', 'circles', 'corrected')
         """
+        global camera_controller
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
         self.send_header('Cache-Control', 'no-cache')
@@ -691,16 +1020,19 @@ class StreamingHandler(BaseHTTPRequestHandler):
 
     def _serve_api_status(self):
         """Serve camera status as JSON"""
+        global camera_controller
         status = camera_controller.get_status()
         self._send_json_response(status)
 
     def _serve_api_sources(self):
         """Serve available sources as JSON"""
+        global camera_controller
         sources = camera_controller.get_available_sources()
         self._send_json_response(sources)
 
     def _handle_api_request(self, path):
         """Handle API requests"""
+        global camera_controller
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 0:
@@ -866,28 +1198,42 @@ def main():
     global camera_controller
 
     print("🎯 Starting Raspberry Pi Camera Streaming System...")
-
-    # Initialize camera controller
-    camera_controller = CameraController(camera_index=0)
-    if not camera_controller.start_capture():
-        print("❌ Failed to initialize camera")
-        return
-
-    print("✅ Camera initialized successfully")
-
-    # Start unified HTTP server
-    server = ThreadingHTTPServer(('0.0.0.0', 8088), StreamingHandler)
-    print("🌐 Server starting on port 8088...")
-    print("📺 Camera stream: http://localhost:8088/stream.mjpg")
-    print("🖥️  Web interface: http://localhost:8088")
-    print("🔧 API endpoints: http://localhost:8088/api/")
+    print("🔍 Faulthandler will catch any segmentation faults")
 
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n🛑 Shutting down...")
-        camera_controller.stop()
-        server.shutdown()
+        # Initialize camera controller
+        print("DEBUG: Creating CameraController...")
+        camera_controller = CameraController(camera_index=0)
+        print("DEBUG: CameraController created successfully")
+
+        print("DEBUG: Starting capture...")
+        if not camera_controller.start_capture():
+            print("❌ Failed to initialize camera")
+            return
+        print("✅ Camera initialized successfully")
+
+        # Start unified HTTP server
+        print("DEBUG: Creating HTTP server...")
+        server = ThreadingHTTPServer(('0.0.0.0', 8088), StreamingHandler)
+        print("🌐 Server starting on port 8088...")
+        print("📺 Camera stream: http://localhost:8088/stream.mjpg")
+        print("🖥️  Web interface: http://localhost:8088")
+        print("🔧 API endpoints: http://localhost:8088/api/")
+
+        try:
+            print("DEBUG: Starting server.serve_forever()...")
+            print("🔄 Monitoring for crashes - will show detailed traceback if segfault occurs")
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\n🛑 Shutting down...")
+            camera_controller.stop()
+            server.shutdown()
+    except Exception as e:
+        print(f"FATAL ERROR in main(): {e}")
+        print("🔍 Dumping all thread stacks:")
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == '__main__':

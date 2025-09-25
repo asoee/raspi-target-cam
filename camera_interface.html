@@ -996,10 +996,17 @@
                         option.textContent = 'No sources available';
                         sourceSelect.appendChild(option);
                     }
+
+                    // Always enable the video source dropdown after loading sources
+                    // This allows users to change sources even if current stream fails
+                    sourceSelect.disabled = false;
                 })
                 .catch(error => {
                     console.error('Failed to load sources:', error);
-                    document.getElementById('videoSource').innerHTML = '<option value="">Error loading sources</option>';
+                    const sourceSelect = document.getElementById('videoSource');
+                    sourceSelect.innerHTML = '<option value="">Error loading sources</option>';
+                    // Still enable the dropdown so users can retry
+                    sourceSelect.disabled = false;
                 });
         }
 
