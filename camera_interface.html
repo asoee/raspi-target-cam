@@ -372,6 +372,30 @@
                 </div>
 
                 <div class="control-group">
+                    <h3>🎯 Bullet Hole Detection</h3>
+
+                    <div class="control-row">
+                        <button onclick="setReferenceFrame()" disabled id="setRefBtn">
+                            📋 Set Reference Frame
+                        </button>
+                    </div>
+
+                    <div class="control-row">
+                        <button onclick="detectBulletHoles()" disabled id="detectHolesBtn">
+                            🔍 Detect Bullet Holes
+                        </button>
+                        <button onclick="clearBulletHoles()" disabled id="clearHolesBtn">
+                            🧹 Clear Holes
+                        </button>
+                    </div>
+
+                    <div class="control-row">
+                        <label>Detected Holes:</label>
+                        <span id="bulletHoleCount">0</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
                     <h3>ℹ️ Stream Info</h3>
 
                     <div class="control-row">
@@ -427,7 +451,7 @@
         }
 
         function enableControls() {
-            const controls = ['videoSource', 'resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'perspectiveCorrection', 'debugMode', 'debugType', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn'];
+            const controls = ['videoSource', 'resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'perspectiveCorrection', 'debugMode', 'debugType', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn', 'setRefBtn'];
             controls.forEach(id => {
                 document.getElementById(id).disabled = false;
             });
@@ -435,6 +459,8 @@
             // Enable debug stream buttons
             const debugButtons = document.querySelectorAll('.debug-stream-btn');
             debugButtons.forEach(btn => btn.disabled = false);
+            
+            // Note: detectHolesBtn is enabled only after setting reference frame
         }
 
         function disableControls() {
@@ -814,6 +840,67 @@
 
             // TODO: Implement recording API call
             console.log('Recording toggle requested:', recording);
+        }
+
+        function setReferenceFrame() {
+            updateStatus("📋 Setting reference frame for bullet hole detection...", false);
+
+            apiCall('/api/set_reference_frame', {})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        // Enable the detect button after setting reference
+                        document.getElementById('detectHolesBtn').disabled = false;
+                        document.getElementById('clearHolesBtn').disabled = false;
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Set reference error: ${error}`, true));
+        }
+
+        function detectBulletHoles() {
+            updateStatus("🔍 Detecting bullet holes...", false);
+
+            apiCall('/api/detect_bullet_holes', {})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        
+                        // Update bullet hole count
+                        const holeCount = response.bullet_holes ? response.bullet_holes.length : 0;
+                        document.getElementById('bulletHoleCount').textContent = holeCount;
+                        
+                        // Display bullet hole details
+                        if (response.bullet_holes && response.bullet_holes.length > 0) {
+                            let details = "\\nDetected holes:\\n";
+                            response.bullet_holes.forEach((hole, i) => {
+                                details += `Hole ${i+1}: (${hole.x}, ${hole.y}) radius=${hole.radius}px score=${hole.score.toFixed(3)}\\n`;
+                            });
+                            updateStatus(`🎯 ${response.message}${details}`, false);
+                        }
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Detection error: ${error}`, true));
+        }
+
+        function clearBulletHoles() {
+            updateStatus("🧹 Clearing bullet holes...", false);
+
+            apiCall('/api/clear_bullet_holes', {})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        
+                        // Reset bullet hole count
+                        document.getElementById('bulletHoleCount').textContent = '0';
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Clear holes error: ${error}`, true));
         }
 
         function pausePlayback() {

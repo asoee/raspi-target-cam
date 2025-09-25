@@ -49,6 +49,7 @@ from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 from target_detection import TargetDetector
 from perspective import Perspective
+from bullet_hole_detection import BulletHoleDetector
 
 
 class CameraController:
@@ -110,6 +111,11 @@ class CameraController:
         
         # Test frame generation
         self.test_frame_counter = 0
+        
+        # Bullet hole detection
+        self.bullet_hole_detector = BulletHoleDetector()
+        self.reference_frame = None  # Store reference frame for bullet hole detection
+        self.bullet_holes = []  # Detected bullet holes
 
     def generate_test_frame(self):
         """Generate a static test frame with useful information"""
@@ -449,6 +455,10 @@ class CameraController:
             frame = self.target_detector.draw_target_overlay(frame, 
                                                            target_info=self.target_detector.detect_target(frame), 
                                                            frame_is_corrected=False)
+        
+        # Add bullet hole overlays if any have been detected
+        if self.bullet_holes:
+            frame = self.bullet_hole_detector.draw_bullet_hole_overlays(frame, self.bullet_holes)
 
         # Skip other transformations if no zoom or pan
         if self.zoom == 1.0 and self.pan_x == 0 and self.pan_y == 0:
@@ -644,69 +654,136 @@ class CameraController:
 
     def step_frame_forward(self):
         """Step one frame forward when paused - works throughout entire video"""
-        if self.source_type == "video" and self.paused:
-            target_frame = self.display_frame_number + 1
-            if target_frame < self.total_frames:
-                success, _ = self.seek_to_frame(target_frame)
-                return success
-        return False
+        if self.source_type != "video" or not self.paused:
+            return False
+            
+        target_frame = self.display_frame_number + 1
+        if target_frame >= self.total_frames:
+            return False  # Already at end
+            
+        try:
+            success, message = self.seek_to_frame(target_frame)
+            if success:
+                print(f"DEBUG: Step forward successful: {message}")
+            else:
+                print(f"DEBUG: Step forward failed: {message}")
+            return success
+        except Exception as e:
+            print(f"ERROR in step_frame_forward: {e}")
+            return False
 
     def step_frame_backward(self):
         """Step one frame backward when paused - works throughout entire video"""
-        if self.source_type == "video" and self.paused:
-            target_frame = self.display_frame_number - 1
-            if target_frame >= 0:
-                success, _ = self.seek_to_frame(target_frame)
-                return success
-        return False
+        if self.source_type != "video" or not self.paused:
+            return False
+            
+        target_frame = self.display_frame_number - 1
+        if target_frame < 0:
+            return False  # Already at start
+            
+        try:
+            success, message = self.seek_to_frame(target_frame)
+            if success:
+                print(f"DEBUG: Step backward successful: {message}")
+            else:
+                print(f"DEBUG: Step backward failed: {message}")
+            return success
+        except Exception as e:
+            print(f"ERROR in step_frame_backward: {e}")
+            return False
 
     def seek_to_frame(self, target_frame):
-        """Seek to a specific frame number in video"""
+        """Seek to a specific frame number in video - SAFE VERSION"""
         if self.source_type != "video":
             return False, "Seek only works with video files"
         
-        if not self.cap or not self.cap.isOpened():
-            return False, "Video capture not available"
-        
-        # Validate frame number
-        if target_frame < 0:
-            target_frame = 0
-        elif self.total_frames > 0 and target_frame >= self.total_frames:
-            target_frame = self.total_frames - 1
-        
-        try:
-            # Set video position to target frame
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+        # Thread safety: acquire lock for video operations
+        with self.lock:
+            if not self.cap or not self.cap.isOpened():
+                return False, "Video capture not available"
             
-            # Update frame counters
-            actual_frame = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-            self.current_frame_number = actual_frame
-            self.display_frame_number = actual_frame
+            # Validate frame number
+            original_target = target_frame
+            if target_frame < 0:
+                target_frame = 0
+            elif self.total_frames > 0 and target_frame >= self.total_frames:
+                target_frame = self.total_frames - 1
             
-            # If video was paused, update the pause buffer index
-            if self.paused:
-                # Clear frame buffer and rebuild from current position
+            # Store current position for potential rollback
+            current_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+            
+            try:
+                print(f"DEBUG: Seeking from frame {current_pos} to frame {target_frame}")
+                
+                # Attempt to set video position
+                success = self.cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+                if not success:
+                    print(f"WARNING: Failed to set frame position to {target_frame}")
+                    return False, f"Failed to seek to frame {target_frame}"
+                
+                # Verify the seek worked
+                actual_frame = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+                print(f"DEBUG: Actually seeked to frame {actual_frame}")
+                
+                # Update frame counters
+                self.current_frame_number = actual_frame
+                self.display_frame_number = actual_frame
+                
+                # Clear frame buffer since we've jumped to a new position
                 self.frame_buffer.clear()
                 self.pause_buffer_index = 0
                 
-                # Read a few frames to populate buffer
-                for i in range(min(10, self.buffer_size // 2)):
-                    ret, frame = self.cap.read()
-                    if ret and self._is_valid_frame(frame):
-                        processed_frame = self._apply_transformations(frame)
+                # Read and process the frame at the new position to update the display
+                try:
+                    ret, new_frame = self.cap.read()
+                    if ret and self._is_valid_frame(new_frame):
+                        # Apply transformations (rotation, zoom, pan, target detection, bullet holes)
+                        processed_frame = self._apply_transformations(new_frame)
                         if self._is_valid_frame(processed_frame):
+                            # Update the display frame
+                            self.frame = processed_frame.copy()
+                            
+                            # Add to frame buffer for potential stepping
                             self.frame_buffer.append(processed_frame.copy())
+                            
+                            print(f"DEBUG: Display frame updated for position {actual_frame}")
+                        else:
+                            print(f"WARNING: Frame transformation failed at position {actual_frame}")
+                            # Still update with original frame
+                            self.frame = new_frame.copy()
                     else:
-                        break
+                        print(f"WARNING: Cannot read frame at position {actual_frame}")
+                        # Try to restore original position
+                        try:
+                            self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+                            return False, f"No valid frame at position {target_frame}"
+                        except:
+                            return False, f"Seek failed and cannot restore position"
+                        
+                except Exception as e:
+                    print(f"WARNING: Failed to read frame at new position: {e}")
+                    # Try to restore original position
+                    try:
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+                        return False, f"Frame read failed after seek: {str(e)}"
+                    except:
+                        return False, f"Seek failed and cannot restore position"
                 
-                # Reset position back to target frame
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
-                self.pause_buffer_index = 0
-            
-            return True, f"Seeked to frame {actual_frame}"
-            
-        except Exception as e:
-            return False, f"Seek failed: {str(e)}"
+                if actual_frame != original_target:
+                    return True, f"Seeked to frame {actual_frame} (requested {original_target})"
+                else:
+                    return True, f"Seeked to frame {actual_frame}"
+                
+            except Exception as e:
+                print(f"ERROR in seek_to_frame: {e}")
+                # Attempt to restore original position
+                try:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+                    print(f"DEBUG: Restored to original position {current_pos}")
+                except:
+                    print(f"ERROR: Cannot restore original position")
+                    
+                return False, f"Seek failed: {str(e)}"
 
     def is_paused(self):
         """Check if playback is paused"""
@@ -757,6 +834,43 @@ class CameraController:
                 cv2.imwrite(filepath, self.frame)
                 return filename
         return None
+
+    def set_reference_frame(self):
+        """Set current frame as reference for bullet hole detection"""
+        with self.lock:
+            if self.frame is not None:
+                self.reference_frame = self.frame.copy()
+                self.bullet_holes = []  # Clear previous detections
+                return True
+        return False
+    
+    def detect_bullet_holes(self):
+        """Detect bullet holes by comparing current frame with reference"""
+        if self.reference_frame is None:
+            return False, "No reference frame set"
+            
+        with self.lock:
+            if self.frame is not None:
+                # Detect bullet holes
+                holes = self.bullet_hole_detector.detect_bullet_holes(
+                    self.reference_frame, self.frame)
+                
+                # Store detected holes and cache in detector for overlay
+                self.bullet_holes = holes
+                self.bullet_hole_detector.last_detection = holes
+                return True, f"Found {len(holes)} bullet hole(s)"
+        
+        return False, "No current frame available"
+    
+    def clear_bullet_holes(self):
+        """Clear all detected bullet holes"""
+        self.bullet_holes = []
+        self.bullet_hole_detector.last_detection = []
+        return True
+    
+    def get_bullet_hole_debug_frame(self, frame_type='combined'):
+        """Get bullet hole detection debug frame"""
+        return self.bullet_hole_detector.get_debug_frame(frame_type)
 
     def calibrate_perspective(self):
         """Perform perspective calibration using current frame"""
@@ -1290,6 +1404,31 @@ class StreamingHandler(BaseHTTPRequestHandler):
                     response = {'success': True, 'message': f'Image captured: {filename}', 'filename': filename}
                 else:
                     response = {'success': False, 'message': 'Failed to capture image'}
+
+            elif path == '/api/set_reference_frame':
+                if camera_controller.set_reference_frame():
+                    response = {'success': True, 'message': 'Reference frame set for bullet hole detection'}
+                else:
+                    response = {'success': False, 'message': 'Failed to set reference frame'}
+
+            elif path == '/api/detect_bullet_holes':
+                success, message = camera_controller.detect_bullet_holes()
+                response = {'success': success, 'message': message}
+                if success and camera_controller.bullet_holes:
+                    # Add bullet hole data to response
+                    holes_data = []
+                    for x, y, radius, score, area, circularity in camera_controller.bullet_holes:
+                        holes_data.append({
+                            'x': int(x), 'y': int(y), 'radius': int(radius),
+                            'score': float(score), 'area': float(area), 'circularity': float(circularity)
+                        })
+                    response['bullet_holes'] = holes_data
+
+            elif path == '/api/clear_bullet_holes':
+                if camera_controller.clear_bullet_holes():
+                    response = {'success': True, 'message': 'Bullet holes cleared'}
+                else:
+                    response = {'success': False, 'message': 'Failed to clear bullet holes'}
 
             elif path == '/api/change_source':
                 source_type = data.get('source_type', '')
