@@ -362,11 +362,8 @@ class CameraController:
                     else:
                         print(f"WARNING: Skipping invalid processed frame")
 
-                    # Handle stepping
-                    if self.step_frame:
-                        self.step_frame = False
-                        if self.paused and self._handle_frame_step():
-                            continue
+                    # Note: Frame stepping is now handled directly via seek_to_frame() 
+                    # in step_frame_forward/backward methods, not through the capture loop
 
                     # Update display frame number for normal playback
                     if not self.paused and self.source_type == "video":
@@ -646,20 +643,70 @@ class CameraController:
         return False
 
     def step_frame_forward(self):
-        """Step one frame forward when paused"""
+        """Step one frame forward when paused - works throughout entire video"""
         if self.source_type == "video" and self.paused:
-            self.step_direction = 1
-            self.step_frame = True
-            return True
+            target_frame = self.display_frame_number + 1
+            if target_frame < self.total_frames:
+                success, _ = self.seek_to_frame(target_frame)
+                return success
         return False
 
     def step_frame_backward(self):
-        """Step one frame backward when paused"""
+        """Step one frame backward when paused - works throughout entire video"""
         if self.source_type == "video" and self.paused:
-            self.step_direction = -1
-            self.step_frame = True
-            return True
+            target_frame = self.display_frame_number - 1
+            if target_frame >= 0:
+                success, _ = self.seek_to_frame(target_frame)
+                return success
         return False
+
+    def seek_to_frame(self, target_frame):
+        """Seek to a specific frame number in video"""
+        if self.source_type != "video":
+            return False, "Seek only works with video files"
+        
+        if not self.cap or not self.cap.isOpened():
+            return False, "Video capture not available"
+        
+        # Validate frame number
+        if target_frame < 0:
+            target_frame = 0
+        elif self.total_frames > 0 and target_frame >= self.total_frames:
+            target_frame = self.total_frames - 1
+        
+        try:
+            # Set video position to target frame
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+            
+            # Update frame counters
+            actual_frame = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+            self.current_frame_number = actual_frame
+            self.display_frame_number = actual_frame
+            
+            # If video was paused, update the pause buffer index
+            if self.paused:
+                # Clear frame buffer and rebuild from current position
+                self.frame_buffer.clear()
+                self.pause_buffer_index = 0
+                
+                # Read a few frames to populate buffer
+                for i in range(min(10, self.buffer_size // 2)):
+                    ret, frame = self.cap.read()
+                    if ret and self._is_valid_frame(frame):
+                        processed_frame = self._apply_transformations(frame)
+                        if self._is_valid_frame(processed_frame):
+                            self.frame_buffer.append(processed_frame.copy())
+                    else:
+                        break
+                
+                # Reset position back to target frame
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+                self.pause_buffer_index = 0
+            
+            return True, f"Seeked to frame {actual_frame}"
+            
+        except Exception as e:
+            return False, f"Seek failed: {str(e)}"
 
     def is_paused(self):
         """Check if playback is paused"""
@@ -673,8 +720,8 @@ class CameraController:
             'total_frames': self.total_frames,
             'buffer_size': len(self.frame_buffer),
             'pause_buffer_index': self.pause_buffer_index if self.paused else None,
-            'can_step_backward': self.paused and self.pause_buffer_index > 0,
-            'can_step_forward': self.paused and self.pause_buffer_index < len(self.frame_buffer) - 1,
+            'can_step_backward': self.paused and self.display_frame_number > 0,
+            'can_step_forward': self.paused and self.display_frame_number < self.total_frames - 1,
             'supports_playback_controls': self.source_type == "video"
         }
 
@@ -1281,6 +1328,11 @@ class StreamingHandler(BaseHTTPRequestHandler):
                     response = {'success': True, 'message': 'Stepped backward one frame'}
                 else:
                     response = {'success': False, 'message': 'Cannot step backward (not paused or at beginning)'}
+
+            elif path == '/api/seek_to_frame':
+                frame_number = data.get('frame', 0)
+                success, message = camera_controller.seek_to_frame(frame_number)
+                response = {'success': success, 'message': message}
 
             elif path == '/api/playback_info':
                 playback_info = camera_controller.get_playback_info()

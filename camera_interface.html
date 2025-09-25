@@ -270,6 +270,12 @@
                     </div>
 
                     <div class="control-row">
+                        <label>Video Position:</label>
+                        <input type="range" id="frameSlider" min="0" max="100" value="0" 
+                               onchange="seekToFrame()" oninput="updateFramePreview()" disabled>
+                    </div>
+
+                    <div class="control-row">
                         <button onclick="pausePlayback()" id="pauseBtn" disabled>
                             ⏸️ Pause
                         </button>
@@ -870,6 +876,38 @@
                 .catch(error => updateStatus(`❌ Step backward error: ${error}`, true));
         }
 
+        function seekToFrame() {
+            const slider = document.getElementById('frameSlider');
+            const targetFrame = parseInt(slider.value);
+            
+            updateStatus(`⏭️ Seeking to frame ${targetFrame}...`, false);
+
+            apiCall('/api/seek_to_frame', { frame: targetFrame })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        updatePlaybackControls();
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Seek error: ${error}`, true));
+        }
+
+        function updateFramePreview() {
+            const slider = document.getElementById('frameSlider');
+            const framePosition = document.getElementById('framePosition');
+            
+            // Get total frames from the slider's max value
+            const totalFrames = parseInt(slider.max);
+            const currentFrame = parseInt(slider.value);
+            
+            // Update the frame position display in real-time as user drags
+            if (totalFrames > 0) {
+                framePosition.textContent = `${currentFrame} / ${totalFrames}`;
+            }
+        }
+
         function updatePlaybackControls() {
             // Fetch current playback info and update UI
             fetch('/api/status')
@@ -884,6 +922,7 @@
             const playbackControlsDiv = document.getElementById('playbackControls');
             const playbackStatus = document.getElementById('playbackStatus');
             const framePosition = document.getElementById('framePosition');
+            const frameSlider = document.getElementById('frameSlider');
             const pauseBtn = document.getElementById('pauseBtn');
             const resumeBtn = document.getElementById('resumeBtn');
             const stepBackBtn = document.getElementById('stepBackBtn');
@@ -901,11 +940,17 @@
                     playbackStatus.style.color = '#27ae60'; // Green
                 }
 
-                // Update frame position
+                // Update frame position and slider
                 if (status.total_frames > 0) {
                     framePosition.textContent = `${status.current_frame} / ${status.total_frames}`;
+                    
+                    // Update slider range and position
+                    frameSlider.max = status.total_frames;
+                    frameSlider.value = status.current_frame;
+                    frameSlider.disabled = false;
                 } else {
                     framePosition.textContent = 'Unknown';
+                    frameSlider.disabled = true;
                 }
 
                 // Update button states
