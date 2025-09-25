@@ -56,8 +56,8 @@ class CameraController:
 
     def __init__(self, camera_index=0):
         self.camera_index = camera_index
-        self.video_file = "./samples/video_20250918_182102.avi"  # Default video file
-        self.source_type = "video"  # Start with video by default to avoid camera hang
+        self.video_file = None
+        self.source_type = "test"  # Start with test pattern to avoid camera hang
         self.cap = None
         self.frame = None
         self.running = False
@@ -107,13 +107,115 @@ class CameraController:
         # Perspective correction for main stream
         self.perspective = Perspective()  # Own perspective correction instance
         self.perspective_correction_enabled = False
+        
+        # Test frame generation
+        self.test_frame_counter = 0
+
+    def generate_test_frame(self):
+        """Generate a static test frame with useful information"""
+        import numpy as np
+        
+        # Create frame with current resolution
+        height, width = self.resolution[1], self.resolution[0]
+        frame = np.zeros((height, width, 3), dtype=np.uint8)
+        
+        # Background gradient
+        for y in range(height):
+            for x in range(width):
+                frame[y, x] = [
+                    int(50 + (x / width) * 100),      # Red gradient
+                    int(30 + (y / height) * 80),      # Green gradient
+                    100                                # Blue constant
+                ]
+        
+        # Add title
+        cv2.putText(frame, "🎯 Raspberry Pi Target Camera", (50, 80),
+                   cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
+        
+        # Add digital clock in top-right corner
+        from datetime import datetime
+        current_time = datetime.now()
+        time_str = current_time.strftime("%H:%M:%S")
+        date_str = current_time.strftime("%Y-%m-%d")
+        
+        # Clock background
+        clock_bg_x = width - 300
+        clock_bg_y = 30
+        clock_bg_w = 250
+        clock_bg_h = 80
+        cv2.rectangle(frame, (clock_bg_x, clock_bg_y), 
+                     (clock_bg_x + clock_bg_w, clock_bg_y + clock_bg_h), 
+                     (0, 0, 0), -1)  # Black background
+        cv2.rectangle(frame, (clock_bg_x, clock_bg_y), 
+                     (clock_bg_x + clock_bg_w, clock_bg_y + clock_bg_h), 
+                     (100, 100, 100), 2)  # Gray border
+        
+        # Digital time display
+        cv2.putText(frame, time_str, (clock_bg_x + 10, clock_bg_y + 35),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2)  # Green digits
+        cv2.putText(frame, date_str, (clock_bg_x + 10, clock_bg_y + 65),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)  # Gray date
+        
+        # Add status information
+        y_pos = 150
+        info_lines = [
+            f"Resolution: {width} x {height}",
+            f"Mode: Test Pattern",
+            f"Status: Waiting for source selection",
+            "",
+            "Select a camera or video source",
+            "from the web interface controls",
+            "",
+            f"Available sources:",
+            f"• {len(self.available_sources.get('cameras', []))} camera(s) detected",
+            f"• {len(self.available_sources.get('videos', []))} video file(s) available"
+        ]
+        
+        for line in info_lines:
+            cv2.putText(frame, line, (50, y_pos),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            y_pos += 40
+        
+        # Add timestamp
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cv2.putText(frame, f"Generated: {timestamp}", (50, height - 50),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+        
+        # Add frame counter (to show it's "live")
+        self.test_frame_counter += 1
+        cv2.putText(frame, f"Frame: {self.test_frame_counter}", (width - 200, height - 50),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+        
+        # Add some visual elements
+        # Corner markers
+        corner_size = 50
+        cv2.rectangle(frame, (0, 0), (corner_size, corner_size), (0, 255, 0), 3)
+        cv2.rectangle(frame, (width - corner_size, 0), (width, corner_size), (0, 255, 0), 3)
+        cv2.rectangle(frame, (0, height - corner_size), (corner_size, height), (0, 255, 0), 3)
+        cv2.rectangle(frame, (width - corner_size, height - corner_size), (width, height), (0, 255, 0), 3)
+        
+        # Center crosshair
+        center_x, center_y = width // 2, height // 2
+        cv2.line(frame, (center_x - 50, center_y), (center_x + 50, center_y), (255, 0, 0), 2)
+        cv2.line(frame, (center_x, center_y - 50), (center_x, center_y + 50), (255, 0, 0), 2)
+        
+        return frame
 
     def start_capture(self):
         """Initialize and start camera or video file capture - SAFE VERSION"""
         try:
             print(f"DEBUG: Initializing {self.source_type} capture...")
             
-            if self.source_type == "camera":
+            if self.source_type == "test":
+                # Test mode - no actual capture device needed
+                print("DEBUG: Test mode - generating static test frame")
+                self.running = True
+                print("DEBUG: Starting capture thread...")
+                threading.Thread(target=self._capture_loop, daemon=True).start()
+                return True
+                
+            elif self.source_type == "camera":
                 print(f"DEBUG: Opening camera {self.camera_index}...")
                 
                 # Use timeout mechanism to prevent hanging
@@ -202,6 +304,15 @@ class CameraController:
                 if not self.running:
                     break
                     
+                # Handle test mode differently
+                if self.source_type == "test":
+                    # Generate test frame
+                    test_frame = self.generate_test_frame()
+                    with self.lock:
+                        self.frame = test_frame.copy()
+                    time.sleep(0.2)  # 10 FPS for test frame updates
+                    continue
+                
                 # Safely check if capture device is available
                 if not self.cap or not self.cap.isOpened():
                     print("WARNING: Capture device not available")
@@ -755,22 +866,22 @@ class CameraController:
                 print("DEBUG: Source change successful")
                 return True, f"Successfully changed to {source_type}: {source_id}"
             else:
-                print("DEBUG: Source change failed - reverting to video")
-                # Fallback to a working video file
-                self.source_type = "video"
-                self.video_file = "./samples/video_20250918_182102.avi"
+                print("DEBUG: Source change failed - reverting to test mode")
+                # Fallback to test mode
+                self.source_type = "test"
+                self.video_file = None
                 self.start_capture()
-                return False, f"Failed to start {source_type}, reverted to video"
+                return False, f"Failed to start {source_type}, reverted to test pattern"
                 
         except Exception as e:
             print(f"CRITICAL ERROR in set_video_source: {e}")
             import traceback
             traceback.print_exc()
             
-            # Emergency fallback
+            # Emergency fallback to test mode
             try:
-                self.source_type = "video"
-                self.video_file = "./samples/video_20250918_182102.avi"
+                self.source_type = "test"
+                self.video_file = None
                 self.start_capture()
             except:
                 pass
@@ -797,6 +908,14 @@ class CameraController:
             except:
                 pass  # Use defaults if unable to get actual values
 
+        # Handle current source display based on type
+        if self.source_type == "camera":
+            current_source = self.camera_index
+        elif self.source_type == "video":
+            current_source = self.video_file
+        else:  # test mode
+            current_source = "Test Pattern"
+        
         status = {
             'resolution': self.resolution,
             'actual_resolution': current_resolution,
@@ -808,7 +927,7 @@ class CameraController:
             'running': self.running,
             'captures_dir': self.captures_dir,
             'source_type': self.source_type,
-            'current_source': self.camera_index if self.source_type == "camera" else self.video_file,
+            'current_source': current_source,
             'perspective_correction_enabled': self.perspective_correction_enabled,
             'perspective_correction_method': 'ellipse-to-circle' if self.perspective.saved_ellipse_data else 'matrix-based',
             'is_video_mode': self.source_type == "video",
