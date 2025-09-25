@@ -434,7 +434,7 @@ class CameraController:
             frame = self._rotate_frame(frame, self.rotation)
 
         # Handle perspective correction and target detection together
-        if self.perspective_correction_enabled and False:
+        if self.perspective_correction_enabled:
             corrected_frame = self.perspective.apply_perspective_correction(frame)
             if corrected_frame is not None:
                 frame = corrected_frame
@@ -446,8 +446,7 @@ class CameraController:
                 frame = self.target_detector.draw_target_overlay(frame)
         else:
             # No perspective correction, use original frame with target overlay
-            pass
-            # frame = self.target_detector.draw_target_overlay(frame)
+            frame = self.target_detector.draw_target_overlay(frame)
 
         # Skip other transformations if no zoom or pan
         if self.zoom == 1.0 and self.pan_x == 0 and self.pan_y == 0:
