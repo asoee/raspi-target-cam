@@ -1096,6 +1096,19 @@
                     const sourceSelect = document.getElementById('videoSource');
                     sourceSelect.innerHTML = '';
 
+                    // Add test pattern first
+                    if (sources.test && sources.test.length > 0) {
+                        const testGroup = document.createElement('optgroup');
+                        testGroup.label = '🎨 Test Pattern';
+                        sources.test.forEach(test => {
+                            const option = document.createElement('option');
+                            option.value = `test|${test.id}`;
+                            option.textContent = test.name;
+                            testGroup.appendChild(option);
+                        });
+                        sourceSelect.appendChild(testGroup);
+                    }
+
                     // Add cameras
                     if (sources.cameras && sources.cameras.length > 0) {
                         const cameraGroup = document.createElement('optgroup');
@@ -1175,6 +1188,8 @@
                     } else if (status.source_type === 'video') {
                         const filename = status.current_source.split('/').pop();
                         currentSourceValue = `video|video_${filename}`;
+                    } else if (status.source_type === 'test') {
+                        currentSourceValue = 'test|test_pattern';
                     }
 
                     // Find and select the current source

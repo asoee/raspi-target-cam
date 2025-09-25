@@ -911,6 +911,12 @@ class CameraController:
         """Detect available cameras and video files at startup"""
         print("DEBUG: Detecting available sources...")
 
+        # Always add test pattern as the first available source
+        self.available_sources['test'] = [{
+            'id': 'test_pattern',
+            'name': 'Test Pattern (Default)'
+        }]
+
         # Check for available cameras (0-5)
         camera_count = 0
         for i in range(6):
@@ -943,7 +949,7 @@ class CameraController:
             except Exception as e:
                 print(f"DEBUG: Error scanning video directory: {e}")
 
-        print(f"DEBUG: Found {camera_count} cameras and {video_count} video files")
+        print(f"DEBUG: Found test pattern, {camera_count} cameras and {video_count} video files")
 
     def get_available_sources(self):
         """Get list of available cameras and video files (cached)"""
@@ -1015,11 +1021,18 @@ class CameraController:
                 video_path = os.path.join(self.samples_dir, filename)
                 if not os.path.exists(video_path):
                     return False, f"Video file not found: {filename}"
-                
+
                 self.source_type = "video"
                 self.video_file = video_path
                 print(f"DEBUG: Configured for video file {video_path}")
-                
+
+            elif source_type == "test":
+                self.source_type = "test"
+                self.video_file = None
+                self.native_video_resolution = None
+                self.native_video_fps = None
+                print("DEBUG: Configured for test pattern")
+
             else:
                 return False, f"Invalid source type: {source_type}"
             
