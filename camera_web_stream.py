@@ -43,6 +43,7 @@ import cv2
 import threading
 import time
 import json
+import subprocess
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -50,6 +51,7 @@ from urllib.parse import urlparse, parse_qs
 from target_detection import TargetDetector
 from perspective import Perspective
 from bullet_hole_detection import BulletHoleDetector
+from camera_controls import CameraControlManager
 
 
 class CameraController:
@@ -74,6 +76,16 @@ class CameraController:
         # Capture settings
         self.captures_dir = "./captures"
         os.makedirs(self.captures_dir, exist_ok=True)
+
+        # Video recording settings
+        self.recordings_dir = "./recordings"
+        os.makedirs(self.recordings_dir, exist_ok=True)
+        self.recording = False
+        self.video_writer = None
+        self.recording_filename = None
+        self.recording_start_time = None
+        self.recording_width = 0
+        self.recording_height = 0
 
         # Video file settings
         self.samples_dir = "./samples"
@@ -116,6 +128,10 @@ class CameraController:
         self.bullet_hole_detector = BulletHoleDetector()
         self.reference_frame = None  # Store reference frame for bullet hole detection
         self.bullet_holes = []  # Detected bullet holes
+
+        # Camera controls
+        self.camera_controls = None  # Will be initialized when camera is opened
+        self.cached_camera_controls = {'available': False, 'controls': {}}  # Cached controls from detection
 
     def generate_test_frame(self):
         """Generate a static test frame with useful information"""
@@ -245,6 +261,29 @@ class CameraController:
                     except Exception as e:
                         print(f"WARNING: Could not set camera properties: {e}")
                         # Continue anyway, camera might still work with default settings
+
+                    # Use cached camera controls from source detection
+                    try:
+                        print(f"DEBUG: Loading cached camera controls for camera {self.camera_index}...")
+
+                        # Find the camera in available sources to get cached controls
+                        camera_source = None
+                        for camera in self.available_sources.get('cameras', []):
+                            if camera['index'] == self.camera_index:
+                                camera_source = camera
+                                break
+
+                        if camera_source and camera_source.get('controls', {}).get('available'):
+                            # Use cached control information
+                            self.cached_camera_controls = camera_source['controls']
+                            print(f"DEBUG: Using cached controls - {len(self.cached_camera_controls['controls'])} controls available")
+                        else:
+                            self.cached_camera_controls = {'available': False, 'controls': {}}
+                            print(f"DEBUG: No cached controls available for camera {self.camera_index}")
+
+                    except Exception as e:
+                        print(f"WARNING: Could not load cached camera controls: {e}")
+                        self.cached_camera_controls = {'available': False, 'controls': {}}
                         
                 except Exception as e:
                     print(f"ERROR: Failed to initialize camera {self.camera_index}: {e}")
@@ -341,6 +380,48 @@ class CameraController:
                     if not self._is_valid_frame(frame):
                         print(f"WARNING: Invalid frame from source, skipping")
                         continue
+
+                    # Write raw frame to video if recording (before any processing)
+                    if self.recording and self.video_writer is not None:
+                        try:
+                            # Ensure frame is in correct format for video writing
+                            if self._is_valid_frame(frame):
+                                # Check frame dimensions match recording dimensions
+                                frame_height, frame_width = frame.shape[:2]
+                                if frame_width != self.recording_width or frame_height != self.recording_height:
+                                    # Resize frame to match recording dimensions
+                                    write_frame = cv2.resize(frame, (self.recording_width, self.recording_height))
+                                else:
+                                    write_frame = frame
+
+                                # Make sure frame is contiguous in memory
+                                if not write_frame.flags['C_CONTIGUOUS']:
+                                    write_frame = write_frame.copy()
+
+                                # Ensure proper color format (BGR, 3 channels)
+                                if len(write_frame.shape) == 2:
+                                    # Convert grayscale to BGR
+                                    write_frame = cv2.cvtColor(write_frame, cv2.COLOR_GRAY2BGR)
+                                elif write_frame.shape[2] == 4:
+                                    # Convert BGRA to BGR
+                                    write_frame = cv2.cvtColor(write_frame, cv2.COLOR_BGRA2BGR)
+                                elif write_frame.shape[2] != 3:
+                                    print(f"WARNING: Unexpected channel count {write_frame.shape[2]}, skipping frame")
+                                    continue
+
+                                # Ensure uint8 data type
+                                if write_frame.dtype != 'uint8':
+                                    write_frame = write_frame.astype('uint8')
+
+                                # Validate final frame before writing
+                                if write_frame.shape == (self.recording_height, self.recording_width, 3):
+                                    self.video_writer.write(write_frame)
+                                else:
+                                    print(f"WARNING: Frame shape mismatch {write_frame.shape} vs expected ({self.recording_height}, {self.recording_width}, 3)")
+                        except Exception as e:
+                            print(f"ERROR writing frame to video: {e}")
+                            import traceback
+                            traceback.print_exc()
 
                     # Update current frame number for video files
                     if self.source_type == "video":
@@ -872,6 +953,415 @@ class CameraController:
         """Get bullet hole detection debug frame"""
         return self.bullet_hole_detector.get_debug_frame(frame_type)
 
+    def start_recording(self):
+        """Start recording video to file"""
+        if self.recording:
+            return False, "Already recording"
+
+        if self.source_type == "test":
+            return False, "Cannot record test pattern"
+
+        if not self.cap or not self.cap.isOpened():
+            return False, "Camera/video source not available"
+
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.recording_filename = f"recording_{timestamp}.mp4"
+        filepath = os.path.join(self.recordings_dir, self.recording_filename)
+
+        # Get dimensions directly from the capture device (before any rotation/processing)
+        # This ensures we record the raw frame dimensions
+        width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        if width <= 0 or height <= 0:
+            return False, f"Invalid frame dimensions: {width}x{height}"
+
+        # Store recording dimensions for validation
+        self.recording_width = width
+        self.recording_height = height
+
+        # Determine recording FPS based on source type
+        if self.source_type == "video":
+            # Use video file's native FPS
+            fps = self.video_fps
+        elif self.cap and self.cap.isOpened():
+            # Try to get camera's actual FPS
+            actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            fps = actual_fps if actual_fps > 0 else 30.0
+        else:
+            # Default fallback
+            fps = 30.0
+
+        # Clamp FPS to reasonable values
+        fps = max(1.0, min(120.0, fps))
+
+        # Try multiple codec options in order of preference
+        # Ordered by quality (less compression artifacts)
+        codec_options = [
+            ('FFV1', '.avi'),   # FFV1 lossless codec (best quality, large files)
+            ('HFYU', '.avi'),   # Huffyuv lossless codec (best quality, large files)
+            ('X264', '.mp4'),   # H.264 (good quality with -1 quality flag)
+            ('MJPG', '.avi'),   # Motion JPEG (minimal compression per frame)
+            ('mp4v', '.mp4'),   # MPEG-4 (acceptable quality)
+            ('XVID', '.avi'),   # Xvid codec (fallback)
+        ]
+
+        self.video_writer = None
+        for codec, ext in codec_options:
+            try:
+                # Update filename extension to match codec
+                test_filename = f"recording_{timestamp}{ext}"
+                test_filepath = os.path.join(self.recordings_dir, test_filename)
+
+                fourcc = cv2.VideoWriter_fourcc(*codec)
+                writer = cv2.VideoWriter(test_filepath, fourcc, fps, (width, height))
+
+                if writer.isOpened():
+                    self.video_writer = writer
+                    self.recording_filename = test_filename
+                    filepath = test_filepath
+                    print(f"Successfully initialized VideoWriter with codec: {codec}")
+                    break
+                else:
+                    writer.release()
+                    # Remove failed file if created
+                    if os.path.exists(test_filepath):
+                        os.remove(test_filepath)
+
+            except Exception as e:
+                print(f"Failed to initialize codec {codec}: {e}")
+                continue
+
+        if self.video_writer is None or not self.video_writer.isOpened():
+            return False, "Failed to initialize video writer with any available codec"
+
+        self.recording = True
+        self.recording_start_time = datetime.now()
+        print(f"Started recording to {filepath} at {width}x{height} @ {fps} fps")
+        return True, f"Recording started: {self.recording_filename} @ {fps:.1f} fps"
+
+    def stop_recording(self):
+        """Stop recording video"""
+        if not self.recording:
+            return False, "Not currently recording"
+
+        self.recording = False
+
+        # Release video writer
+        if self.video_writer is not None:
+            try:
+                self.video_writer.release()
+                self.video_writer = None
+
+                # Calculate recording duration
+                if self.recording_start_time:
+                    duration = (datetime.now() - self.recording_start_time).total_seconds()
+                    filepath = os.path.join(self.recordings_dir, self.recording_filename)
+                    filesize_mb = os.path.getsize(filepath) / (1024 * 1024)
+                    message = f"Recording saved: {self.recording_filename} ({duration:.1f}s, {filesize_mb:.1f}MB)"
+                else:
+                    message = f"Recording saved: {self.recording_filename}"
+
+                print(message)
+                return True, message
+
+            except Exception as e:
+                return False, f"Error stopping recording: {str(e)}"
+
+        return True, "Recording stopped"
+
+    def get_recording_status(self):
+        """Get current recording status"""
+        if not self.recording:
+            return {
+                'recording': False,
+                'filename': None,
+                'duration': 0
+            }
+
+        duration = 0
+        if self.recording_start_time:
+            duration = (datetime.now() - self.recording_start_time).total_seconds()
+
+        return {
+            'recording': True,
+            'filename': self.recording_filename,
+            'duration': duration
+        }
+
+    def get_camera_controls(self):
+        """Get available camera controls from cached data"""
+        return {
+            'available': self.cached_camera_controls.get('available', False),
+            'controls': self.cached_camera_controls.get('controls', {})
+        }
+
+    def set_camera_control(self, name, value):
+        """Set a camera control value using the existing camera instance"""
+        if not self.cached_camera_controls.get('available'):
+            return False, "Camera controls not available"
+
+        if name not in self.cached_camera_controls.get('controls', {}):
+            return False, f"Control '{name}' not available"
+
+        if not self.cap or not self.cap.isOpened():
+            return False, "Camera not available for control changes"
+
+        try:
+            # Map control names to OpenCV property IDs
+            control_mapping = {
+                'brightness': cv2.CAP_PROP_BRIGHTNESS,
+                'contrast': cv2.CAP_PROP_CONTRAST,
+                'saturation': cv2.CAP_PROP_SATURATION,
+                'hue': cv2.CAP_PROP_HUE,
+                'gain': cv2.CAP_PROP_GAIN,
+                'gamma': cv2.CAP_PROP_GAMMA,
+                'exposure': cv2.CAP_PROP_EXPOSURE,
+                'auto_exposure': cv2.CAP_PROP_AUTO_EXPOSURE,
+                'auto_wb': cv2.CAP_PROP_AUTO_WB,
+                'backlight': cv2.CAP_PROP_BACKLIGHT,
+                'sharpness': cv2.CAP_PROP_SHARPNESS,
+                'temperature': cv2.CAP_PROP_TEMPERATURE,
+                'wb_temperature': cv2.CAP_PROP_WB_TEMPERATURE,
+            }
+
+            if name not in control_mapping:
+                return False, f"Control '{name}' not supported for direct setting"
+
+            # Validate value against cached range
+            control_info = self.cached_camera_controls['controls'][name]
+            min_val = control_info.get('min')
+            max_val = control_info.get('max')
+
+            if min_val is not None and max_val is not None:
+                if value < min_val or value > max_val:
+                    return False, f"Value {value} out of range for {name} (valid: {min_val} to {max_val})"
+
+            # Set the control using the existing camera instance
+            prop_id = control_mapping[name]
+            success = self.cap.set(prop_id, float(value))
+
+            if success:
+                # Verify the value was set correctly
+                actual_value = self.cap.get(prop_id)
+
+                # Update cached value
+                self.cached_camera_controls['controls'][name]['current'] = actual_value
+
+                return True, f"Set {name} to {actual_value}"
+            else:
+                return False, f"Failed to set {name} (OpenCV returned false)"
+
+        except Exception as e:
+            return False, f"Error setting {name}: {str(e)}"
+
+    def get_camera_control(self, name):
+        """Get current value of a camera control from cached data"""
+        if not self.cached_camera_controls.get('available'):
+            return None
+
+        if name not in self.cached_camera_controls.get('controls', {}):
+            return None
+
+        return self.cached_camera_controls['controls'][name].get('current')
+
+    def reset_camera_controls(self):
+        """Reset all camera controls to defaults using existing camera instance"""
+        if not self.cached_camera_controls.get('available'):
+            return False, "Camera controls not available"
+
+        if not self.cap or not self.cap.isOpened():
+            return False, "Camera not available for control reset"
+
+        try:
+            success_count = 0
+            total_count = 0
+
+            # Reset each control that has a default value
+            for name, control_info in self.cached_camera_controls['controls'].items():
+                default_val = control_info.get('default')
+                if default_val is not None:
+                    total_count += 1
+                    success, message = self.set_camera_control(name, default_val)
+                    if success:
+                        success_count += 1
+
+            return True, f"Reset {success_count}/{total_count} controls to defaults"
+
+        except Exception as e:
+            return False, f"Error resetting controls: {str(e)}"
+
+    def set_camera_resolution(self, width, height, fps, format_name):
+        """Set camera resolution, frame rate, and format using existing camera instance"""
+        if not self.cap or not self.cap.isOpened():
+            return False, "Camera not available for resolution change"
+
+        try:
+            print(f"DEBUG: Setting camera resolution to {width}x{height} @ {fps}fps ({format_name})")
+
+            # Map format name to OpenCV fourcc code
+            format_mapping = {
+                'MJPG': cv2.VideoWriter_fourcc(*'MJPG'),
+                'YUYV': cv2.VideoWriter_fourcc(*'YUYV'),
+                'YUY2': cv2.VideoWriter_fourcc(*'YUY2'),
+            }
+
+            fourcc_code = format_mapping.get(format_name.upper())
+            if fourcc_code is None:
+                return False, f"Unsupported format: {format_name}"
+
+            # Set the format first
+            format_success = self.cap.set(cv2.CAP_PROP_FOURCC, fourcc_code)
+            if not format_success:
+                print(f"DEBUG: Warning - could not set format to {format_name}")
+
+            # Set resolution
+            width_success = self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            height_success = self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+
+            # Set frame rate
+            fps_success = self.cap.set(cv2.CAP_PROP_FPS, fps)
+
+            # Verify the settings took effect
+            actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+
+            print(f"DEBUG: Resolution set result - Width: {width_success}, Height: {height_success}, FPS: {fps_success}")
+            print(f"DEBUG: Actual values - {actual_width}x{actual_height} @ {actual_fps}fps")
+
+            if actual_width == width and actual_height == height:
+                message = f"Resolution changed to {actual_width}x{actual_height} @ {actual_fps:.1f}fps ({format_name})"
+                if actual_fps != fps:
+                    message += f" (requested {fps}fps)"
+                return True, message
+            else:
+                return False, f"Resolution change failed - got {actual_width}x{actual_height}, expected {width}x{height}"
+
+        except Exception as e:
+            return False, f"Error setting resolution: {str(e)}"
+
+    def save_camera_preset(self, preset_name):
+        """Save current camera control settings as a preset"""
+        if not self.cached_camera_controls.get('available'):
+            return False, "Camera controls not available"
+
+        try:
+            # Create preset from cached current values
+            preset = {}
+            for name, control_info in self.cached_camera_controls['controls'].items():
+                preset[name] = control_info.get('current')
+
+            # Save to file for persistence
+            preset_file = f"./presets/{preset_name}.json"
+            os.makedirs("./presets", exist_ok=True)
+            with open(preset_file, 'w') as f:
+                json.dump(preset, f, indent=2)
+            return True, f"Saved preset '{preset_name}' with {len(preset)} controls"
+        except Exception as e:
+            return False, f"Error saving preset: {str(e)}"
+
+    def load_camera_preset(self, preset_name):
+        """Load camera control settings from a preset using existing camera instance"""
+        if not self.cached_camera_controls.get('available'):
+            return False, "Camera controls not available"
+
+        if not self.cap or not self.cap.isOpened():
+            return False, "Camera not available for preset loading"
+
+        try:
+            preset_file = f"./presets/{preset_name}.json"
+            if not os.path.exists(preset_file):
+                return False, f"Preset '{preset_name}' not found"
+
+            with open(preset_file, 'r') as f:
+                preset = json.load(f)
+
+            # Apply preset using existing camera instance
+            success_count = 0
+            total_count = 0
+
+            for name, value in preset.items():
+                if name in self.cached_camera_controls['controls']:
+                    total_count += 1
+                    success, message = self.set_camera_control(name, value)
+                    if success:
+                        success_count += 1
+
+            return True, f"Loaded preset '{preset_name}': {success_count}/{total_count} controls applied"
+
+        except Exception as e:
+            return False, f"Error loading preset: {str(e)}"
+
+    def list_camera_presets(self):
+        """List available camera presets"""
+        try:
+            presets_dir = "./presets"
+            if not os.path.exists(presets_dir):
+                return []
+
+            presets = []
+            for filename in os.listdir(presets_dir):
+                if filename.endswith('.json'):
+                    preset_name = filename[:-5]  # Remove .json extension
+                    presets.append(preset_name)
+            return presets
+        except Exception as e:
+            print(f"Error listing presets: {e}")
+            return []
+
+    def get_camera_formats(self):
+        """Get available formats and resolutions for the current camera"""
+        if self.source_type != 'camera':
+            return {'available': False, 'formats': []}
+
+        # Find the current camera in available sources
+        camera_source = None
+        for camera in self.available_sources.get('cameras', []):
+            if camera['index'] == self.camera_index:
+                camera_source = camera
+                break
+
+        if not camera_source or 'controls' not in camera_source:
+            return {'available': False, 'formats': []}
+
+        formats_data = camera_source['controls'].get('formats', [])
+
+        # Convert to UI-friendly format
+        resolution_options = []
+
+        for format_info in formats_data:
+            format_name = format_info.get('name', 'Unknown')
+            format_desc = format_info.get('description', '')
+
+            for res_info in format_info.get('resolutions', []):
+                size = res_info.get('size', '')
+                framerates = res_info.get('framerates', [])
+
+                if size and framerates:
+                    # Create options for each framerate
+                    for fps in sorted(framerates, reverse=True):  # Sort highest fps first
+                        option = {
+                            'value': f"{size}@{fps:.0f}fps_{format_name}",
+                            'label': f"{size} @ {fps:.0f}fps ({format_name})",
+                            'width': int(size.split('x')[0]) if 'x' in size else 0,
+                            'height': int(size.split('x')[1]) if 'x' in size else 0,
+                            'fps': fps,
+                            'format': format_name,
+                            'format_desc': format_desc
+                        }
+                        resolution_options.append(option)
+
+        # Sort by resolution (width * height) and then by fps
+        resolution_options.sort(key=lambda x: (x['width'] * x['height'], -x['fps']))
+
+        return {
+            'available': True,
+            'formats': formats_data,
+            'resolution_options': resolution_options
+        }
+
     def calibrate_perspective(self):
         """Perform perspective calibration using current frame"""
         try:
@@ -908,7 +1398,7 @@ class CameraController:
 
 
     def _detect_available_sources(self):
-        """Detect available cameras and video files at startup"""
+        """Detect available cameras and video files using V4L2"""
         print("DEBUG: Detecting available sources...")
 
         # Always add test pattern as the first available source
@@ -917,21 +1407,23 @@ class CameraController:
             'name': 'Test Pattern (Default)'
         }]
 
-        # Check for available cameras (0-5)
+        # Use V4L2 to detect cameras properly
         camera_count = 0
-        for i in range(6):
-            try:
-                cap = cv2.VideoCapture(i)
-                if cap.isOpened():
-                    self.available_sources['cameras'].append({
-                        'id': f'camera_{i}',
-                        'name': f'Camera {i}',
-                        'index': i
-                    })
-                    camera_count += 1
-                cap.release()
-            except Exception as e:
-                print(f"DEBUG: Error checking camera {i}: {e}")
+        detected_cameras = self._detect_v4l2_cameras()
+
+        for camera_info in detected_cameras:
+            # Detect and cache camera controls during enumeration
+            controls_info = self._detect_camera_controls(camera_info['index'])
+
+            self.available_sources['cameras'].append({
+                'id': f'camera_{camera_info["index"]}',
+                'name': camera_info['name'],
+                'index': camera_info['index'],
+                'device_path': camera_info['device_path'],
+                'driver': camera_info.get('driver', 'unknown'),
+                'controls': controls_info
+            })
+            camera_count += 1
 
         # Check for video files in samples directory
         video_count = 0
@@ -950,6 +1442,247 @@ class CameraController:
                 print(f"DEBUG: Error scanning video directory: {e}")
 
         print(f"DEBUG: Found test pattern, {camera_count} cameras and {video_count} video files")
+
+    def _detect_v4l2_cameras(self):
+        """Detect cameras using V4L2 enumeration"""
+        cameras = []
+
+        try:
+            # Method 1: Use v4l2-ctl to list devices
+            result = subprocess.run(['v4l2-ctl', '--list-devices'],
+                                  capture_output=True, text=True, timeout=5)
+
+            if result.returncode == 0:
+                cameras.extend(self._parse_v4l2_devices(result.stdout))
+            else:
+                print(f"DEBUG: v4l2-ctl failed, using fallback detection")
+                cameras.extend(self._detect_cameras_fallback())
+
+        except Exception as e:
+            print(f"DEBUG: V4L2 detection failed ({e}), using fallback")
+            cameras.extend(self._detect_cameras_fallback())
+
+        return cameras
+
+    def _parse_v4l2_devices(self, v4l2_output):
+        """Parse v4l2-ctl --list-devices output"""
+        cameras = []
+        current_device = None
+
+        for line in v4l2_output.split('\n'):
+            original_line = line
+            line = line.strip()
+            if not line:
+                continue
+
+            if original_line.startswith('\t/dev/video'):
+                # This is a device path (indented with tab)
+                if current_device:
+                    device_path = line
+                    # Extract index from /dev/videoX
+                    try:
+                        index = int(device_path.split('video')[1])
+                        cameras.append({
+                            'index': index,
+                            'name': current_device['name'],
+                            'device_path': device_path,
+                            'driver': current_device.get('driver', 'unknown')
+                        })
+                    except (ValueError, IndexError):
+                        continue
+            elif not original_line.startswith('\t') and ':' in line:
+                # This is a device description line (not indented)
+                # Format: "device_name (driver_info):"
+                device_line = line.rstrip(':')
+
+                if '(' in device_line and ')' in device_line:
+                    # Extract name and driver
+                    name_part = device_line.split('(')[0].strip()
+                    driver_part = device_line.split('(')[1].split(')')[0].strip()
+                else:
+                    # No driver info in parentheses
+                    name_part = device_line
+                    driver_part = 'unknown'
+
+                current_device = {
+                    'name': name_part,
+                    'driver': driver_part
+                }
+
+        # Filter to only include actual camera devices (not platform devices)
+        camera_devices = []
+        for cam in cameras:
+            # Skip platform devices, codec devices, etc.
+            if any(skip in cam['name'].lower() for skip in ['pisp', 'hevc', 'codec', 'platform']):
+                continue
+            # Include USB cameras and similar, or devices with "camera" in name
+            if (any(include in cam['name'].lower() for include in ['camera', 'usb', 'webcam']) or
+                'usb-' in cam['driver'] or 'camera' in cam['driver'].lower()):
+                camera_devices.append(cam)
+
+        return camera_devices
+
+    def _detect_cameras_fallback(self):
+        """Fallback camera detection using direct device enumeration"""
+        cameras = []
+
+        # Check /dev/video* devices directly
+        for i in range(10):  # Check first 10 video devices
+            device_path = f"/dev/video{i}"
+            if os.path.exists(device_path):
+                try:
+                    # Try to get device info without opening camera
+                    result = subprocess.run(['v4l2-ctl', f'--device={device_path}', '--info'],
+                                          capture_output=True, text=True, timeout=2)
+
+                    if result.returncode == 0:
+                        # Parse device info
+                        device_name = f"Camera {i}"
+                        driver = "unknown"
+
+                        for line in result.stdout.split('\n'):
+                            if 'Card type' in line:
+                                device_name = line.split(':')[1].strip()
+                            elif 'Driver name' in line:
+                                driver = line.split(':')[1].strip()
+
+                        # Skip non-camera devices
+                        if any(skip in device_name.lower() for skip in ['pisp', 'hevc', 'codec']):
+                            continue
+
+                        cameras.append({
+                            'index': i,
+                            'name': device_name,
+                            'device_path': device_path,
+                            'driver': driver
+                        })
+
+                except Exception as e:
+                    print(f"DEBUG: Error checking {device_path}: {e}")
+                    continue
+
+        return cameras
+
+    def _detect_camera_controls(self, camera_index):
+        """Detect camera controls and capabilities for a specific camera"""
+        controls_info = {
+            'available': False,
+            'controls': {},
+            'formats': [],
+            'error': None
+        }
+
+        try:
+            print(f"DEBUG: Detecting controls for camera {camera_index}...")
+
+            # Use a temporary camera instance to detect controls
+            temp_controls = CameraControlManager(camera_index, auto_detect=False)
+
+            # Try to open camera briefly for control detection
+            temp_controls.open()
+            if temp_controls.cap and temp_controls.cap.isOpened():
+                # Detect controls
+                temp_controls.detect_controls()
+                available_controls = temp_controls.list_controls()
+
+                if len(available_controls) > 0:
+                    controls_info['available'] = True
+
+                    # Cache control information
+                    for control_name in available_controls:
+                        control_data = temp_controls.get_control_info(control_name)
+                        current_value = temp_controls.get(control_name)
+
+                        controls_info['controls'][control_name] = {
+                            'current': current_value,
+                            'min': control_data.min_value,
+                            'max': control_data.max_value,
+                            'default': control_data.default_value,
+                            'type': control_data.control_type
+                        }
+
+                    print(f"DEBUG: Cached {len(available_controls)} controls for camera {camera_index}")
+                else:
+                    print(f"DEBUG: No controls found for camera {camera_index}")
+
+            # Detect available formats using v4l2-ctl
+            try:
+                device_path = f"/dev/video{camera_index}"
+                result = subprocess.run(['v4l2-ctl', f'--device={device_path}', '--list-formats-ext'],
+                                      capture_output=True, text=True, timeout=5)
+
+                if result.returncode == 0:
+                    formats = self._parse_v4l2_formats(result.stdout)
+                    controls_info['formats'] = formats
+                    print(f"DEBUG: Found {len(formats)} formats for camera {camera_index}")
+
+            except Exception as e:
+                print(f"DEBUG: Could not detect formats for camera {camera_index}: {e}")
+
+            # Close temporary camera
+            temp_controls.close()
+
+        except Exception as e:
+            controls_info['error'] = str(e)
+            print(f"DEBUG: Error detecting controls for camera {camera_index}: {e}")
+
+        return controls_info
+
+    def _parse_v4l2_formats(self, format_output):
+        """Parse v4l2-ctl --list-formats-ext output with frame rates"""
+        formats = []
+        current_format = None
+        current_resolution = None
+
+        for line in format_output.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+
+            # Format line: [0]: 'MJPG' (Motion-JPEG, compressed)
+            if line.startswith('[') and ']:' in line:
+                # Save previous format
+                if current_format and current_format.get('resolutions'):
+                    formats.append(current_format)
+
+                if 'MJPG' in line or 'YUYV' in line:
+                    format_name = line.split("'")[1] if "'" in line else 'unknown'
+                    format_desc = line.split('(')[1].split(')')[0] if '(' in line else 'unknown'
+                    current_format = {
+                        'name': format_name,
+                        'description': format_desc,
+                        'resolutions': []
+                    }
+                else:
+                    current_format = None
+
+            # Resolution line: Size: Discrete 640x480
+            elif line.startswith('Size: Discrete') and current_format:
+                resolution = line.split('Discrete ')[1] if 'Discrete ' in line else ''
+                if 'x' in resolution:
+                    current_resolution = {
+                        'size': resolution,
+                        'framerates': []
+                    }
+                    current_format['resolutions'].append(current_resolution)
+
+            # Frame rate line: Interval: Discrete 0.033s (30.000 fps)
+            elif line.startswith('Interval: Discrete') and current_resolution:
+                if 'fps)' in line:
+                    # Extract fps from line like "Interval: Discrete 0.033s (30.000 fps)"
+                    fps_part = line.split('(')[1].split(' fps')[0] if '(' in line and ' fps' in line else ''
+                    try:
+                        fps = float(fps_part)
+                        if fps not in current_resolution['framerates']:
+                            current_resolution['framerates'].append(fps)
+                    except ValueError:
+                        continue
+
+        # Add the last format if it exists
+        if current_format and current_format.get('resolutions'):
+            formats.append(current_format)
+
+        return formats
 
     def get_available_sources(self):
         """Get list of available cameras and video files (cached)"""
@@ -1121,15 +1854,26 @@ class CameraController:
         playback_status = self.get_playback_info()
         status.update(playback_status)
 
+        # Add camera controls status
+        camera_controls_status = self.get_camera_controls()
+        status['camera_controls'] = camera_controls_status
+
         return status
 
     def stop(self):
         """Stop camera capture"""
         self.running = False
-        
+
+        # Stop any ongoing recording
+        if self.recording:
+            try:
+                self.stop_recording()
+            except Exception as e:
+                print(f"WARNING: Error stopping recording: {e}")
+
         # Simple wait for capture loop to notice running=False
         time.sleep(0.5)
-        
+
         # Release capture device
         if self.cap:
             try:
@@ -1137,12 +1881,20 @@ class CameraController:
                 self.cap = None
             except Exception as e:
                 print(f"WARNING: Error releasing capture device: {e}")
-        
+
         # Clear frame buffer
         try:
             self.frame_buffer.clear()
         except:
             pass
+
+        # Close camera controls
+        if self.camera_controls:
+            try:
+                self.camera_controls.close()
+                self.camera_controls = None
+            except Exception as e:
+                print(f"WARNING: Error closing camera controls: {e}")
 
 
 class StreamingHandler(BaseHTTPRequestHandler):
@@ -1167,6 +1919,24 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 self._serve_api_status()
             elif path == '/api/sources':
                 self._serve_api_sources()
+            elif path == '/api/camera_controls':
+                controls_info = camera_controller.get_camera_controls()
+                self._send_json_response({'success': True, 'data': controls_info})
+            elif path == '/api/camera_formats':
+                formats_info = camera_controller.get_camera_formats()
+                self._send_json_response({'success': True, 'data': formats_info})
+            elif path == '/api/start_recording':
+                success, message = camera_controller.start_recording()
+                self._send_json_response({'success': success, 'message': message})
+            elif path == '/api/stop_recording':
+                success, message = camera_controller.stop_recording()
+                self._send_json_response({'success': success, 'message': message})
+            elif path == '/api/recording_status':
+                recording_status = camera_controller.get_recording_status()
+                self._send_json_response({'success': True, 'data': recording_status})
+            elif path == '/api/list_camera_presets':
+                presets = camera_controller.list_camera_presets()
+                self._send_json_response({'success': True, 'presets': presets})
             elif path.endswith('.html') or path.endswith('.css') or path.endswith('.js'):
                 self._serve_file(path[1:])  # Remove leading slash
             else:
@@ -1489,6 +2259,83 @@ class StreamingHandler(BaseHTTPRequestHandler):
             elif path == '/api/playback_info':
                 playback_info = camera_controller.get_playback_info()
                 response = {'success': True, 'data': playback_info}
+
+            # Camera controls endpoints
+            elif path == '/api/camera_controls':
+                controls_info = camera_controller.get_camera_controls()
+                response = {'success': True, 'data': controls_info}
+
+            elif path == '/api/set_camera_control':
+                control_name = data.get('name', '')
+                control_value = data.get('value', 0)
+                if control_name:
+                    success, message = camera_controller.set_camera_control(control_name, control_value)
+                    response = {'success': success, 'message': message}
+                else:
+                    response = {'success': False, 'message': 'Control name is required'}
+
+            elif path == '/api/get_camera_control':
+                control_name = data.get('name', '')
+                if control_name:
+                    current_value = camera_controller.get_camera_control(control_name)
+                    if current_value is not None:
+                        response = {'success': True, 'value': current_value}
+                    else:
+                        response = {'success': False, 'message': f'Control {control_name} not available'}
+                else:
+                    response = {'success': False, 'message': 'Control name is required'}
+
+            elif path == '/api/reset_camera_controls':
+                success, message = camera_controller.reset_camera_controls()
+                response = {'success': success, 'message': message}
+
+            elif path == '/api/save_camera_preset':
+                preset_name = data.get('name', '')
+                if preset_name:
+                    success, message = camera_controller.save_camera_preset(preset_name)
+                    response = {'success': success, 'message': message}
+                else:
+                    response = {'success': False, 'message': 'Preset name is required'}
+
+            elif path == '/api/load_camera_preset':
+                preset_name = data.get('name', '')
+                if preset_name:
+                    success, message = camera_controller.load_camera_preset(preset_name)
+                    response = {'success': success, 'message': message}
+                else:
+                    response = {'success': False, 'message': 'Preset name is required'}
+
+            elif path == '/api/list_camera_presets':
+                presets = camera_controller.list_camera_presets()
+                response = {'success': True, 'presets': presets}
+
+            elif path == '/api/set_resolution':
+                width = data.get('width', 0)
+                height = data.get('height', 0)
+                fps = data.get('fps', 30)
+                format_name = data.get('format', 'MJPG')
+
+                if width > 0 and height > 0:
+                    success, message = camera_controller.set_camera_resolution(width, height, fps, format_name)
+                    response = {'success': success, 'message': message}
+                else:
+                    response = {'success': False, 'message': 'Valid width and height are required'}
+
+            elif path == '/api/camera_formats':
+                formats_info = camera_controller.get_camera_formats()
+                response = {'success': True, 'data': formats_info}
+
+            elif path == '/api/start_recording':
+                success, message = camera_controller.start_recording()
+                response = {'success': success, 'message': message}
+
+            elif path == '/api/stop_recording':
+                success, message = camera_controller.stop_recording()
+                response = {'success': success, 'message': message}
+
+            elif path == '/api/recording_status':
+                recording_status = camera_controller.get_recording_status()
+                response = {'success': True, 'data': recording_status}
 
             self._send_json_response(response)
 

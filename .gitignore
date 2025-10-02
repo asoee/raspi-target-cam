@@ -208,5 +208,6 @@ __marimo__/
 
 .idea/
 captures/
+recordings/
 samples/
 /test_outputs/

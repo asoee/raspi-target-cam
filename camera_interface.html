@@ -199,16 +199,9 @@
                     </div>
 
                     <div class="control-row">
-                        <label>Resolution:</label>
+                        <label>Resolution & Format:</label>
                         <select id="resolution" onchange="changeResolution()" disabled>
-                            <option value="640x480">640 x 480 (30fps)</option>
-                            <option value="1024x768">1024 x 768 (30fps)</option>
-                            <option value="1280x960">1280 x 960 (20fps)</option>
-                            <option value="1600x1200">1600 x 1200 (20fps)</option>
-                            <option value="2048x1536">2048 x 1536 (20fps)</option>
-                            <option value="2592x1944" selected>2592 x 1944 (15fps)</option>
-                            <option value="3200x2400">3200 x 2400 (20fps)</option>
-                            <option value="3264x2448">3264 x 2448 (15fps)</option>
+                            <option value="">Loading resolutions...</option>
                         </select>
                     </div>
 
@@ -253,6 +246,152 @@
                             <option value="true" selected>Enabled</option>
                             <option value="false">Disabled</option>
                         </select>
+                    </div>
+                </div>
+
+                <div class="control-group" id="cameraControlsGroup">
+                    <h3>📹 Camera Settings</h3>
+
+                    <div id="cameraControlsStatus" class="control-row">
+                        <label>Camera Controls:</label>
+                        <span id="controlsAvailable">Loading...</span>
+                    </div>
+
+                    <!-- Image Quality Controls -->
+                    <div id="imageQualityControls" style="display: none;">
+                        <h4 style="margin: 15px 0 10px 0; color: #34495e; font-size: 14px;">🎨 Image Quality</h4>
+
+                        <div class="control-row">
+                            <label>Brightness:</label>
+                            <input type="range" id="brightness" min="-64" max="64" value="0"
+                                   onchange="setCameraControl('brightness', this.value)" oninput="updateControlValue('brightness', this.value)">
+                            <span id="brightnessValue">0</span>
+                        </div>
+
+                        <div class="control-row">
+                            <label>Contrast:</label>
+                            <input type="range" id="contrast" min="0" max="64" value="32"
+                                   onchange="setCameraControl('contrast', this.value)" oninput="updateControlValue('contrast', this.value)">
+                            <span id="contrastValue">32</span>
+                        </div>
+
+                        <div class="control-row">
+                            <label>Saturation:</label>
+                            <input type="range" id="saturation" min="0" max="128" value="75"
+                                   onchange="setCameraControl('saturation', this.value)" oninput="updateControlValue('saturation', this.value)">
+                            <span id="saturationValue">75</span>
+                        </div>
+
+                        <div class="control-row">
+                            <label>Hue:</label>
+                            <input type="range" id="hue" min="-40" max="40" value="0"
+                                   onchange="setCameraControl('hue', this.value)" oninput="updateControlValue('hue', this.value)">
+                            <span id="hueValue">0</span>
+                        </div>
+
+                        <div class="control-row">
+                            <label>Sharpness:</label>
+                            <input type="range" id="sharpness" min="0" max="6" value="3"
+                                   onchange="setCameraControl('sharpness', this.value)" oninput="updateControlValue('sharpness', this.value)">
+                            <span id="sharpnessValue">3</span>
+                        </div>
+
+                        <div class="control-row">
+                            <label>Gamma:</label>
+                            <input type="range" id="gamma" min="72" max="500" value="100"
+                                   onchange="setCameraControl('gamma', this.value)" oninput="updateControlValue('gamma', this.value)">
+                            <span id="gammaValue">100</span>
+                        </div>
+                    </div>
+
+                    <!-- Exposure Controls -->
+                    <div id="exposureControls" style="display: none;">
+                        <h4 style="margin: 15px 0 10px 0; color: #34495e; font-size: 14px;">☀️ Exposure</h4>
+
+                        <div class="control-row">
+                            <label>Auto Exposure:</label>
+                            <select id="auto_exposure" onchange="setCameraControl('auto_exposure', this.value)">
+                                <option value="0">Manual</option>
+                                <option value="1">Auto</option>
+                                <option value="2">Shutter Priority</option>
+                                <option value="3" selected>Aperture Priority</option>
+                            </select>
+                        </div>
+
+                        <div class="control-row">
+                            <label>Exposure Time:</label>
+                            <input type="range" id="exposure" min="1" max="5000" value="78"
+                                   onchange="setCameraControl('exposure', this.value)" oninput="updateControlValue('exposure', this.value)">
+                            <span id="exposureValue">78</span>
+                        </div>
+
+                        <div class="control-row">
+                            <label>Gain:</label>
+                            <input type="range" id="gain" min="0" max="100" value="0"
+                                   onchange="setCameraControl('gain', this.value)" oninput="updateControlValue('gain', this.value)">
+                            <span id="gainValue">0</span>
+                        </div>
+
+                        <div class="control-row">
+                            <label>Backlight Compensation:</label>
+                            <select id="backlight" onchange="setCameraControl('backlight', this.value)">
+                                <option value="0">Off</option>
+                                <option value="1" selected>Normal</option>
+                                <option value="2">Strong</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- White Balance Controls -->
+                    <div id="whiteBalanceControls" style="display: none;">
+                        <h4 style="margin: 15px 0 10px 0; color: #34495e; font-size: 14px;">🌡️ White Balance</h4>
+
+                        <div class="control-row">
+                            <label>Auto White Balance:</label>
+                            <select id="auto_wb" onchange="setCameraControl('auto_wb', this.value)">
+                                <option value="0">Manual</option>
+                                <option value="1" selected>Auto</option>
+                            </select>
+                        </div>
+
+                        <div class="control-row">
+                            <label>Color Temperature:</label>
+                            <input type="range" id="temperature" min="2800" max="6500" value="4600"
+                                   onchange="setCameraControl('temperature', this.value)" oninput="updateControlValue('temperature', this.value)">
+                            <span id="temperatureValue">4600K</span>
+                        </div>
+
+                        <div class="control-row">
+                            <label>WB Temperature:</label>
+                            <input type="range" id="wb_temperature" min="2800" max="6500" value="4600"
+                                   onchange="setCameraControl('wb_temperature', this.value)" oninput="updateControlValue('wb_temperature', this.value)">
+                            <span id="wb_temperatureValue">4600K</span>
+                        </div>
+                    </div>
+
+                    <!-- Camera Control Presets -->
+                    <div id="presetControls" style="display: none;">
+                        <h4 style="margin: 15px 0 10px 0; color: #34495e; font-size: 14px;">💾 Presets</h4>
+
+                        <div class="control-row">
+                            <label>Available Presets:</label>
+                            <select id="presetList" onchange="loadSelectedPreset()">
+                                <option value="">Select preset...</option>
+                            </select>
+                            <button onclick="loadSelectedPreset()" disabled id="loadPresetBtn">Load</button>
+                        </div>
+
+                        <div class="control-row">
+                            <label>Save Preset:</label>
+                            <input type="text" id="presetName" placeholder="Enter preset name">
+                            <button onclick="saveCurrentPreset()" disabled id="savePresetBtn">Save</button>
+                        </div>
+
+                        <div class="control-row">
+                            <button onclick="resetCameraControls()" disabled id="resetControlsBtn">
+                                🔄 Reset to Defaults
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -620,11 +759,33 @@
         }
 
         function changeResolution() {
-            const resolution = document.getElementById('resolution').value;
-            updateStatus(`🔄 Changing resolution to ${resolution}...`, false);
+            const resolutionValue = document.getElementById('resolution').value;
+
+            if (!resolutionValue) return;
+
+            // Parse the new format: "640x480@30fps_MJPG"
+            const parts = resolutionValue.split('@');
+            if (parts.length < 2) {
+                updateStatus('❌ Invalid resolution format', true);
+                return;
+            }
+
+            const resolution = parts[0]; // "640x480"
+            const fpsAndFormat = parts[1]; // "30fps_MJPG"
+            const [fpsStr, format] = fpsAndFormat.split('_');
+            const fps = parseFloat(fpsStr.replace('fps', ''));
+
+            updateStatus(`🔄 Changing to ${resolution} @ ${fps}fps (${format})...`, false);
 
             const [width, height] = resolution.split('x').map(Number);
-            apiCall('/api/resolution', { width, height })
+
+            // Send resolution change with format information
+            apiCall('/api/resolution', {
+                width,
+                height,
+                fps: fps,
+                format: format
+            })
                 .then(response => {
                     if (response.success) {
                         updateStatus(`✅ ${response.message}`, false);
@@ -828,18 +989,50 @@
 
         function toggleRecording() {
             const btn = document.getElementById('recordBtn');
-            recording = !recording;
 
             if (recording) {
-                btn.textContent = '⏹️ Stop Recording';
-                updateStatus("🔴 Recording started...", false);
-            } else {
-                btn.textContent = '🔴 Start Recording';
-                updateStatus("⏹️ Recording stopped", false);
-            }
+                // Stop recording
+                updateStatus("⏹️ Stopping recording...", false);
+                btn.disabled = true;
 
-            // TODO: Implement recording API call
-            console.log('Recording toggle requested:', recording);
+                apiCall('/api/stop_recording', {})
+                    .then(response => {
+                        if (response.success) {
+                            recording = false;
+                            btn.textContent = '🔴 Start Recording';
+                            btn.disabled = false;
+                            updateStatus(`✅ ${response.message}`, false);
+                        } else {
+                            btn.disabled = false;
+                            updateStatus(`❌ ${response.message}`, true);
+                        }
+                    })
+                    .catch(error => {
+                        btn.disabled = false;
+                        updateStatus(`❌ Stop recording error: ${error}`, true);
+                    });
+            } else {
+                // Start recording
+                updateStatus("🔴 Starting recording...", false);
+                btn.disabled = true;
+
+                apiCall('/api/start_recording', {})
+                    .then(response => {
+                        if (response.success) {
+                            recording = true;
+                            btn.textContent = '⏹️ Stop Recording';
+                            btn.disabled = false;
+                            updateStatus(`✅ ${response.message}`, false);
+                        } else {
+                            btn.disabled = false;
+                            updateStatus(`❌ ${response.message}`, true);
+                        }
+                    })
+                    .catch(error => {
+                        btn.disabled = false;
+                        updateStatus(`❌ Start recording error: ${error}`, true);
+                    });
+            }
         }
 
         function setReferenceFrame() {
@@ -1060,6 +1253,311 @@
             }, 100);
         }
 
+        // Camera Controls Functions
+        function updateControlValue(controlName, value) {
+            // Update the display value immediately
+            const valueElement = document.getElementById(controlName + 'Value');
+            if (valueElement) {
+                if (controlName === 'temperature' || controlName === 'wb_temperature') {
+                    valueElement.textContent = value + 'K';
+                } else {
+                    valueElement.textContent = value;
+                }
+            }
+        }
+
+        function setCameraControl(controlName, value) {
+            updateStatus(`🎛️ Setting ${controlName} to ${value}...`, false);
+
+            apiCall('/api/set_camera_control', { name: controlName, value: parseFloat(value) })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        // Update the displayed value
+                        updateControlValue(controlName, value);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                        // Revert the UI control to its previous value
+                        loadCameraControls();
+                    }
+                })
+                .catch(error => {
+                    updateStatus(`❌ Control error: ${error}`, true);
+                    // Revert the UI control to its previous value
+                    loadCameraControls();
+                });
+        }
+
+        function loadCameraControls() {
+            fetch('/api/camera_controls')
+                .then(response => response.json())
+                .then(result => {
+                    const controlsAvailable = document.getElementById('controlsAvailable');
+                    const imageQualityControls = document.getElementById('imageQualityControls');
+                    const exposureControls = document.getElementById('exposureControls');
+                    const whiteBalanceControls = document.getElementById('whiteBalanceControls');
+                    const presetControls = document.getElementById('presetControls');
+
+                    if (result.success && result.data.available) {
+                        const controls = result.data.controls;
+                        controlsAvailable.textContent = `✅ ${Object.keys(controls).length} controls available`;
+                        controlsAvailable.style.color = '#27ae60';
+
+                        // Show control sections
+                        imageQualityControls.style.display = 'block';
+                        exposureControls.style.display = 'block';
+                        whiteBalanceControls.style.display = 'block';
+                        presetControls.style.display = 'block';
+
+                        // Update control values and ranges
+                        Object.keys(controls).forEach(controlName => {
+                            const control = controls[controlName];
+                            const element = document.getElementById(controlName);
+
+                            if (element) {
+                                // Update current value
+                                element.value = control.current;
+
+                                // Update range if available
+                                if (control.min !== null && control.min !== undefined) {
+                                    element.min = control.min;
+                                }
+                                if (control.max !== null && control.max !== undefined) {
+                                    element.max = control.max;
+                                }
+
+                                // Update display value
+                                updateControlValue(controlName, control.current);
+
+                                // Enable the control
+                                element.disabled = false;
+                            }
+                        });
+
+                        // Enable preset buttons
+                        document.getElementById('savePresetBtn').disabled = false;
+                        document.getElementById('resetControlsBtn').disabled = false;
+
+                        // Load available presets
+                        loadPresetList();
+
+                    } else {
+                        controlsAvailable.textContent = '❌ Camera controls not available';
+                        controlsAvailable.style.color = '#e74c3c';
+
+                        // Hide control sections
+                        imageQualityControls.style.display = 'none';
+                        exposureControls.style.display = 'none';
+                        whiteBalanceControls.style.display = 'none';
+                        presetControls.style.display = 'none';
+                    }
+                })
+                .catch(error => {
+                    console.error('Failed to load camera controls:', error);
+                    const controlsAvailable = document.getElementById('controlsAvailable');
+                    controlsAvailable.textContent = '❌ Error loading controls';
+                    controlsAvailable.style.color = '#e74c3c';
+                });
+        }
+
+        function loadPresetList() {
+            fetch('/api/list_camera_presets')
+                .then(response => response.json())
+                .then(result => {
+                    const presetList = document.getElementById('presetList');
+                    const loadPresetBtn = document.getElementById('loadPresetBtn');
+
+                    // Clear existing options except the first one
+                    while (presetList.options.length > 1) {
+                        presetList.removeChild(presetList.lastChild);
+                    }
+
+                    if (result.success && result.presets.length > 0) {
+                        result.presets.forEach(presetName => {
+                            const option = document.createElement('option');
+                            option.value = presetName;
+                            option.textContent = presetName;
+                            presetList.appendChild(option);
+                        });
+
+                        loadPresetBtn.disabled = false;
+                    } else {
+                        loadPresetBtn.disabled = true;
+                    }
+                })
+                .catch(error => {
+                    console.error('Failed to load presets:', error);
+                });
+        }
+
+        function loadSelectedPreset() {
+            const presetList = document.getElementById('presetList');
+            const selectedPreset = presetList.value;
+
+            if (!selectedPreset) return;
+
+            updateStatus(`💾 Loading preset '${selectedPreset}'...`, false);
+
+            apiCall('/api/load_camera_preset', { name: selectedPreset })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        // Reload camera controls to update UI
+                        setTimeout(() => loadCameraControls(), 500);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Load preset error: ${error}`, true));
+        }
+
+        function saveCurrentPreset() {
+            const presetNameInput = document.getElementById('presetName');
+            const presetName = presetNameInput.value.trim();
+
+            if (!presetName) {
+                updateStatus('❌ Please enter a preset name', true);
+                return;
+            }
+
+            updateStatus(`💾 Saving preset '${presetName}'...`, false);
+
+            apiCall('/api/save_camera_preset', { name: presetName })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        presetNameInput.value = '';
+                        // Reload preset list
+                        loadPresetList();
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Save preset error: ${error}`, true));
+        }
+
+        function resetCameraControls() {
+            if (!confirm('Reset all camera controls to their default values?')) {
+                return;
+            }
+
+            updateStatus('🔄 Resetting camera controls to defaults...', false);
+
+            apiCall('/api/reset_camera_controls', {})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        // Reload camera controls to update UI
+                        setTimeout(() => loadCameraControls(), 500);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Reset error: ${error}`, true));
+        }
+
+        // Load camera format and resolution options
+        function loadCameraFormats() {
+            fetch('/api/camera_formats')
+                .then(response => response.json())
+                .then(result => {
+                    const resolutionSelect = document.getElementById('resolution');
+
+                    if (result.success && result.data.available) {
+                        const options = result.data.resolution_options || [];
+
+                        // Clear existing options
+                        resolutionSelect.innerHTML = '';
+
+                        if (options.length > 0) {
+                            // Add resolution options grouped by format
+                            let currentFormat = '';
+                            let optGroup = null;
+
+                            options.forEach(option => {
+                                if (option.format !== currentFormat) {
+                                    // Create new optgroup for this format
+                                    if (optGroup) {
+                                        resolutionSelect.appendChild(optGroup);
+                                    }
+                                    optGroup = document.createElement('optgroup');
+                                    optGroup.label = `${option.format} (${option.format_desc})`;
+                                    currentFormat = option.format;
+                                }
+
+                                const optionElement = document.createElement('option');
+                                optionElement.value = option.value;
+                                optionElement.textContent = option.label;
+                                optGroup.appendChild(optionElement);
+                            });
+
+                            // Add the last optgroup
+                            if (optGroup) {
+                                resolutionSelect.appendChild(optGroup);
+                            }
+
+                            resolutionSelect.disabled = false;
+                            console.log(`Loaded ${options.length} resolution options`);
+                        } else {
+                            resolutionSelect.innerHTML = '<option value="">No resolutions available</option>';
+                        }
+                    } else {
+                        resolutionSelect.innerHTML = '<option value="">Formats not available</option>';
+                    }
+                })
+                .catch(error => {
+                    console.error('Failed to load camera formats:', error);
+                    const resolutionSelect = document.getElementById('resolution');
+                    resolutionSelect.innerHTML = '<option value="">Error loading formats</option>';
+                });
+        }
+
+        // Handle resolution/format change
+        function changeResolution() {
+            const resolutionSelect = document.getElementById('resolution');
+            const selectedValue = resolutionSelect.value;
+
+            if (!selectedValue) {
+                return;
+            }
+
+            console.log('Changing resolution to:', selectedValue);
+            updateStatus('🔄 Changing camera resolution...', false);
+
+            // Parse the resolution format: "640x480@30fps_MJPG"
+            const parts = selectedValue.split('@');
+            if (parts.length !== 2) {
+                updateStatus('❌ Invalid resolution format', true);
+                return;
+            }
+
+            const resolution = parts[0];  // "640x480"
+            const formatPart = parts[1];  // "30fps_MJPG"
+            const formatParts = formatPart.split('_');
+            const fps = parseFloat(formatParts[0].replace('fps', ''));
+            const format = formatParts[1];
+
+            const [width, height] = resolution.split('x').map(Number);
+
+            // Send resolution change request
+            apiCall('/api/set_resolution', {
+                width: width,
+                height: height,
+                fps: fps,
+                format: format
+            })
+            .then(response => {
+                if (response.success) {
+                    updateStatus(`✅ Resolution changed to ${resolution} @ ${fps}fps (${format})`, false);
+                } else {
+                    updateStatus(`❌ ${response.message}`, true);
+                }
+            })
+            .catch(error => {
+                updateStatus(`❌ Resolution change error: ${error}`, true);
+            });
+        }
+
         // Initialize on page load
         window.addEventListener('load', function() {
             // Load available sources first
@@ -1067,6 +1565,12 @@
 
             // Load current camera status
             loadCameraStatus();
+
+            // Load camera controls
+            loadCameraControls();
+
+            // Load camera formats after controls
+            loadCameraFormats();
 
             // Set initial status
             setTimeout(() => {
