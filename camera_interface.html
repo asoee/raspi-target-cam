@@ -80,20 +80,60 @@
             display: flex;
             align-items: center;
             margin-bottom: 10px;
+            gap: 5px;
         }
 
         .control-row label {
-            flex: 1;
+            flex: 0 0 120px;
             font-weight: bold;
             color: #555;
         }
 
-        .control-row input, .control-row select, .control-row button {
+        .control-row input[type="range"] {
             flex: 1;
-            margin-left: 10px;
+            margin: 0 5px;
+        }
+
+        .control-row .value-display {
+            flex: 0 0 60px;
+            text-align: center;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+
+        .control-row input, .control-row select {
             padding: 8px;
             border: 1px solid #ddd;
             border-radius: 4px;
+        }
+
+        .control-buttons {
+            display: flex;
+            gap: 3px;
+        }
+
+        .control-btn {
+            padding: 4px 8px;
+            font-size: 12px;
+            min-width: 30px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .control-btn:hover {
+            background-color: #2980b9;
+        }
+
+        .control-btn.reset {
+            background-color: #95a5a6;
+        }
+
+        .control-btn.reset:hover {
+            background-color: #7f8c8d;
         }
 
         button {
@@ -263,44 +303,74 @@
 
                         <div class="control-row">
                             <label>Brightness:</label>
-                            <input type="range" id="brightness" min="-64" max="64" value="0"
+                            <input type="range" id="brightness" min="-64" max="64" value="0" step="1"
                                    onchange="setCameraControl('brightness', this.value)" oninput="updateControlValue('brightness', this.value)">
-                            <span id="brightnessValue">0</span>
+                            <span class="value-display" id="brightnessValue">0</span>
+                            <div class="control-buttons">
+                                <button class="control-btn" onclick="adjustControl('brightness', -1)" title="Decrease">−</button>
+                                <button class="control-btn" onclick="adjustControl('brightness', 1)" title="Increase">+</button>
+                                <button class="control-btn reset" onclick="resetControl('brightness')" title="Reset to default">↺</button>
+                            </div>
                         </div>
 
                         <div class="control-row">
                             <label>Contrast:</label>
-                            <input type="range" id="contrast" min="0" max="64" value="32"
+                            <input type="range" id="contrast" min="0" max="64" value="32" step="1"
                                    onchange="setCameraControl('contrast', this.value)" oninput="updateControlValue('contrast', this.value)">
-                            <span id="contrastValue">32</span>
+                            <span class="value-display" id="contrastValue">32</span>
+                            <div class="control-buttons">
+                                <button class="control-btn" onclick="adjustControl('contrast', -1)" title="Decrease">−</button>
+                                <button class="control-btn" onclick="adjustControl('contrast', 1)" title="Increase">+</button>
+                                <button class="control-btn reset" onclick="resetControl('contrast')" title="Reset to default">↺</button>
+                            </div>
                         </div>
 
                         <div class="control-row">
                             <label>Saturation:</label>
-                            <input type="range" id="saturation" min="0" max="128" value="75"
+                            <input type="range" id="saturation" min="0" max="128" value="75" step="1"
                                    onchange="setCameraControl('saturation', this.value)" oninput="updateControlValue('saturation', this.value)">
-                            <span id="saturationValue">75</span>
+                            <span class="value-display" id="saturationValue">75</span>
+                            <div class="control-buttons">
+                                <button class="control-btn" onclick="adjustControl('saturation', -1)" title="Decrease">−</button>
+                                <button class="control-btn" onclick="adjustControl('saturation', 1)" title="Increase">+</button>
+                                <button class="control-btn reset" onclick="resetControl('saturation')" title="Reset to default">↺</button>
+                            </div>
                         </div>
 
                         <div class="control-row">
                             <label>Hue:</label>
-                            <input type="range" id="hue" min="-40" max="40" value="0"
+                            <input type="range" id="hue" min="-40" max="40" value="0" step="1"
                                    onchange="setCameraControl('hue', this.value)" oninput="updateControlValue('hue', this.value)">
-                            <span id="hueValue">0</span>
+                            <span class="value-display" id="hueValue">0</span>
+                            <div class="control-buttons">
+                                <button class="control-btn" onclick="adjustControl('hue', -1)" title="Decrease">−</button>
+                                <button class="control-btn" onclick="adjustControl('hue', 1)" title="Increase">+</button>
+                                <button class="control-btn reset" onclick="resetControl('hue')" title="Reset to default">↺</button>
+                            </div>
                         </div>
 
                         <div class="control-row">
                             <label>Sharpness:</label>
-                            <input type="range" id="sharpness" min="0" max="6" value="3"
+                            <input type="range" id="sharpness" min="0" max="6" value="3" step="1"
                                    onchange="setCameraControl('sharpness', this.value)" oninput="updateControlValue('sharpness', this.value)">
-                            <span id="sharpnessValue">3</span>
+                            <span class="value-display" id="sharpnessValue">3</span>
+                            <div class="control-buttons">
+                                <button class="control-btn" onclick="adjustControl('sharpness', -1)" title="Decrease">−</button>
+                                <button class="control-btn" onclick="adjustControl('sharpness', 1)" title="Increase">+</button>
+                                <button class="control-btn reset" onclick="resetControl('sharpness')" title="Reset to default">↺</button>
+                            </div>
                         </div>
 
                         <div class="control-row">
                             <label>Gamma:</label>
-                            <input type="range" id="gamma" min="72" max="500" value="100"
+                            <input type="range" id="gamma" min="72" max="500" value="100" step="1"
                                    onchange="setCameraControl('gamma', this.value)" oninput="updateControlValue('gamma', this.value)">
-                            <span id="gammaValue">100</span>
+                            <span class="value-display" id="gammaValue">100</span>
+                            <div class="control-buttons">
+                                <button class="control-btn" onclick="adjustControl('gamma', -1)" title="Decrease">−</button>
+                                <button class="control-btn" onclick="adjustControl('gamma', 1)" title="Increase">+</button>
+                                <button class="control-btn reset" onclick="resetControl('gamma')" title="Reset to default">↺</button>
+                            </div>
                         </div>
                     </div>
 
@@ -320,16 +390,26 @@
 
                         <div class="control-row">
                             <label>Exposure Time:</label>
-                            <input type="range" id="exposure" min="1" max="5000" value="78"
+                            <input type="range" id="exposure" min="1" max="5000" value="78" step="1"
                                    onchange="setCameraControl('exposure', this.value)" oninput="updateControlValue('exposure', this.value)">
-                            <span id="exposureValue">78</span>
+                            <span class="value-display" id="exposureValue">78</span>
+                            <div class="control-buttons">
+                                <button class="control-btn" onclick="adjustControl('exposure', -1)" title="Decrease">−</button>
+                                <button class="control-btn" onclick="adjustControl('exposure', 1)" title="Increase">+</button>
+                                <button class="control-btn reset" onclick="resetControl('exposure')" title="Reset to default">↺</button>
+                            </div>
                         </div>
 
                         <div class="control-row">
                             <label>Gain:</label>
-                            <input type="range" id="gain" min="0" max="100" value="0"
+                            <input type="range" id="gain" min="0" max="100" value="0" step="1"
                                    onchange="setCameraControl('gain', this.value)" oninput="updateControlValue('gain', this.value)">
-                            <span id="gainValue">0</span>
+                            <span class="value-display" id="gainValue">0</span>
+                            <div class="control-buttons">
+                                <button class="control-btn" onclick="adjustControl('gain', -1)" title="Decrease">−</button>
+                                <button class="control-btn" onclick="adjustControl('gain', 1)" title="Increase">+</button>
+                                <button class="control-btn reset" onclick="resetControl('gain')" title="Reset to default">↺</button>
+                            </div>
                         </div>
 
                         <div class="control-row">
@@ -356,16 +436,26 @@
 
                         <div class="control-row">
                             <label>Color Temperature:</label>
-                            <input type="range" id="temperature" min="2800" max="6500" value="4600"
+                            <input type="range" id="temperature" min="2800" max="6500" value="4600" step="100"
                                    onchange="setCameraControl('temperature', this.value)" oninput="updateControlValue('temperature', this.value)">
-                            <span id="temperatureValue">4600K</span>
+                            <span class="value-display" id="temperatureValue">4600K</span>
+                            <div class="control-buttons">
+                                <button class="control-btn" onclick="adjustControl('temperature', -100)" title="Decrease">−</button>
+                                <button class="control-btn" onclick="adjustControl('temperature', 100)" title="Increase">+</button>
+                                <button class="control-btn reset" onclick="resetControl('temperature')" title="Reset to default">↺</button>
+                            </div>
                         </div>
 
                         <div class="control-row">
                             <label>WB Temperature:</label>
-                            <input type="range" id="wb_temperature" min="2800" max="6500" value="4600"
+                            <input type="range" id="wb_temperature" min="2800" max="6500" value="4600" step="100"
                                    onchange="setCameraControl('wb_temperature', this.value)" oninput="updateControlValue('wb_temperature', this.value)">
-                            <span id="wb_temperatureValue">4600K</span>
+                            <span class="value-display" id="wb_temperatureValue">4600K</span>
+                            <div class="control-buttons">
+                                <button class="control-btn" onclick="adjustControl('wb_temperature', -100)" title="Decrease">−</button>
+                                <button class="control-btn" onclick="adjustControl('wb_temperature', 100)" title="Increase">+</button>
+                                <button class="control-btn reset" onclick="resetControl('wb_temperature')" title="Reset to default">↺</button>
+                            </div>
                         </div>
                     </div>
 
@@ -1285,6 +1375,52 @@
                     updateStatus(`❌ Control error: ${error}`, true);
                     // Revert the UI control to its previous value
                     loadCameraControls();
+                });
+        }
+
+        function adjustControl(controlName, delta) {
+            const element = document.getElementById(controlName);
+            if (!element) return;
+
+            const currentValue = parseFloat(element.value);
+            const step = parseFloat(element.step) || 1;
+            const min = parseFloat(element.min);
+            const max = parseFloat(element.max);
+
+            // Calculate new value
+            let newValue = currentValue + delta;
+
+            // Clamp to valid range
+            newValue = Math.max(min, Math.min(max, newValue));
+
+            // Update slider and trigger change
+            element.value = newValue;
+            updateControlValue(controlName, newValue);
+            setCameraControl(controlName, newValue);
+        }
+
+        function resetControl(controlName) {
+            // Fetch current control info to get default value
+            fetch('/api/camera_controls')
+                .then(response => response.json())
+                .then(result => {
+                    if (result.success && result.data.available) {
+                        const control = result.data.controls[controlName];
+                        if (control && control.default !== null && control.default !== undefined) {
+                            const element = document.getElementById(controlName);
+                            if (element) {
+                                element.value = control.default;
+                                updateControlValue(controlName, control.default);
+                                setCameraControl(controlName, control.default);
+                                updateStatus(`🔄 Reset ${controlName} to default (${control.default})`, false);
+                            }
+                        } else {
+                            updateStatus(`⚠️ No default value available for ${controlName}`, true);
+                        }
+                    }
+                })
+                .catch(error => {
+                    updateStatus(`❌ Error resetting control: ${error}`, true);
                 });
         }
 

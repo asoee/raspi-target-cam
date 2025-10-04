@@ -3,3 +3,5 @@ numpy>=1.19.0
 PyYAML>=5.4.0
 linuxpy>=0.23.0
 git+https://github.com/pupil-labs/pyuvc.git
+Pillow>=9.0.0
+piexif>=1.1.3
