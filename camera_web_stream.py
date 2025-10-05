@@ -2218,6 +2218,44 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 success, message = camera_controller.set_video_source(source_type, source_id)
                 response = {'success': success, 'message': message}
 
+                # Include camera formats if switching to camera
+                if success and source_type == 'camera':
+                    try:
+                        formats = camera_controller.get_camera_formats()
+                        if formats and formats.get('available'):
+                            response['camera_formats'] = formats
+                            # Include current camera settings - read ACTUAL values from camera
+                            if camera_controller.cap and camera_controller.cap.isOpened():
+                                actual_width = int(camera_controller.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                                actual_height = int(camera_controller.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                                actual_fps = camera_controller.cap.get(cv2.CAP_PROP_FPS)
+                                print(f"DEBUG: Actual camera settings - {actual_width}x{actual_height}@{actual_fps}fps")
+
+                                # Find matching option by width, height, and fps
+                                current_resolution = None
+                                for option in formats['resolution_options']:
+                                    if (option['width'] == actual_width and
+                                        option['height'] == actual_height and
+                                        abs(option['fps'] - actual_fps) < 0.1):  # Allow small fps difference
+                                        current_resolution = option['value']
+                                        print(f"DEBUG: Matched resolution option: {current_resolution}")
+                                        break
+
+                                if current_resolution:
+                                    response['current_resolution'] = current_resolution
+                                else:
+                                    print(f"WARNING: Could not find matching resolution for {actual_width}x{actual_height}@{actual_fps}fps")
+                                    print(f"DEBUG: Available options:")
+                                    for option in formats['resolution_options'][:5]:  # Print first 5
+                                        print(f"  - {option['width']}x{option['height']}@{option['fps']}fps = {option['value']}")
+
+                        # Include camera controls
+                        controls = camera_controller.get_camera_controls()
+                        if controls and controls.get('available'):
+                            response['camera_controls'] = controls
+                    except Exception as e:
+                        print(f"WARNING: Could not get camera formats: {e}")
+
             elif path == '/api/perspective_correction':
                 enabled = data.get('enabled', False)
                 if camera_controller.set_perspective_correction(enabled):

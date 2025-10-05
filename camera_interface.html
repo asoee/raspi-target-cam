@@ -837,6 +837,17 @@
                 .then(response => {
                     if (response.success) {
                         updateStatus(`✅ ${response.message}`, false);
+
+                        // If camera formats are included, update resolution dropdown immediately
+                        if (response.camera_formats && response.camera_formats.available) {
+                            updateResolutionOptions(response.camera_formats.resolution_options, response.current_resolution);
+                        }
+
+                        // If camera controls are included, update controls immediately
+                        if (response.camera_controls && response.camera_controls.available) {
+                            updateCameraControlsUI(response.camera_controls);
+                        }
+
                         setTimeout(() => {
                             refreshStream();
                             loadCameraStatus(); // Reload status to update controls for new source
@@ -1424,75 +1435,83 @@
                 });
         }
 
+        // Update camera controls UI with provided data
+        function updateCameraControlsUI(controlsData) {
+            const controlsAvailable = document.getElementById('controlsAvailable');
+            const imageQualityControls = document.getElementById('imageQualityControls');
+            const exposureControls = document.getElementById('exposureControls');
+            const whiteBalanceControls = document.getElementById('whiteBalanceControls');
+            const presetControls = document.getElementById('presetControls');
+
+            if (controlsData.available) {
+                const controls = controlsData.controls;
+                controlsAvailable.textContent = `✅ ${Object.keys(controls).length} controls available`;
+                controlsAvailable.style.color = '#27ae60';
+
+                // Show control sections
+                imageQualityControls.style.display = 'block';
+                exposureControls.style.display = 'block';
+                whiteBalanceControls.style.display = 'block';
+                presetControls.style.display = 'block';
+
+                // Update control values and ranges
+                Object.keys(controls).forEach(controlName => {
+                    const control = controls[controlName];
+                    const element = document.getElementById(controlName);
+
+                    if (element) {
+                        // Update current value
+                        element.value = control.current;
+
+                        // Update range if available
+                        if (control.min !== null && control.min !== undefined) {
+                            element.min = control.min;
+                        }
+                        if (control.max !== null && control.max !== undefined) {
+                            element.max = control.max;
+                        }
+
+                        // Update display value
+                        updateControlValue(controlName, control.current);
+
+                        // Enable the control
+                        element.disabled = false;
+                    }
+                });
+
+                // Enable preset buttons
+                document.getElementById('savePresetBtn').disabled = false;
+                document.getElementById('resetControlsBtn').disabled = false;
+
+                // Load available presets
+                loadPresetList();
+
+                console.log(`Updated camera controls UI with ${Object.keys(controls).length} controls`);
+            } else {
+                controlsAvailable.textContent = '❌ Camera controls not available';
+                controlsAvailable.style.color = '#e74c3c';
+
+                // Hide control sections
+                imageQualityControls.style.display = 'none';
+                exposureControls.style.display = 'none';
+                whiteBalanceControls.style.display = 'none';
+                presetControls.style.display = 'none';
+            }
+        }
+
         function loadCameraControls() {
             fetch('/api/camera_controls')
                 .then(response => response.json())
                 .then(result => {
-                    const controlsAvailable = document.getElementById('controlsAvailable');
-                    const imageQualityControls = document.getElementById('imageQualityControls');
-                    const exposureControls = document.getElementById('exposureControls');
-                    const whiteBalanceControls = document.getElementById('whiteBalanceControls');
-                    const presetControls = document.getElementById('presetControls');
-
-                    if (result.success && result.data.available) {
-                        const controls = result.data.controls;
-                        controlsAvailable.textContent = `✅ ${Object.keys(controls).length} controls available`;
-                        controlsAvailable.style.color = '#27ae60';
-
-                        // Show control sections
-                        imageQualityControls.style.display = 'block';
-                        exposureControls.style.display = 'block';
-                        whiteBalanceControls.style.display = 'block';
-                        presetControls.style.display = 'block';
-
-                        // Update control values and ranges
-                        Object.keys(controls).forEach(controlName => {
-                            const control = controls[controlName];
-                            const element = document.getElementById(controlName);
-
-                            if (element) {
-                                // Update current value
-                                element.value = control.current;
-
-                                // Update range if available
-                                if (control.min !== null && control.min !== undefined) {
-                                    element.min = control.min;
-                                }
-                                if (control.max !== null && control.max !== undefined) {
-                                    element.max = control.max;
-                                }
-
-                                // Update display value
-                                updateControlValue(controlName, control.current);
-
-                                // Enable the control
-                                element.disabled = false;
-                            }
-                        });
-
-                        // Enable preset buttons
-                        document.getElementById('savePresetBtn').disabled = false;
-                        document.getElementById('resetControlsBtn').disabled = false;
-
-                        // Load available presets
-                        loadPresetList();
-
+                    if (result.success) {
+                        updateCameraControlsUI(result.data);
                     } else {
-                        controlsAvailable.textContent = '❌ Camera controls not available';
-                        controlsAvailable.style.color = '#e74c3c';
-
-                        // Hide control sections
-                        imageQualityControls.style.display = 'none';
-                        exposureControls.style.display = 'none';
-                        whiteBalanceControls.style.display = 'none';
-                        presetControls.style.display = 'none';
+                        updateCameraControlsUI({available: false, controls: {}});
                     }
                 })
                 .catch(error => {
                     console.error('Failed to load camera controls:', error);
-                    const controlsAvailable = document.getElementById('controlsAvailable');
-                    controlsAvailable.textContent = '❌ Error loading controls';
-                    controlsAvailable.style.color = '#e74c3c';
+                    updateCameraControlsUI({available: false, controls: {}});
                 });
         }
 
@@ -1590,6 +1609,60 @@
                     }
                 })
                 .catch(error => updateStatus(`❌ Reset error: ${error}`, true));
+        }
+
+        // Update resolution dropdown options
+        function updateResolutionOptions(options, currentResolution = null) {
+            const resolutionSelect = document.getElementById('resolution');
+
+            // Clear existing options
+            resolutionSelect.innerHTML = '';
+
+            if (options && options.length > 0) {
+                // Group options by format first
+                const optionsByFormat = {};
+                options.forEach(option => {
+                    if (!optionsByFormat[option.format]) {
+                        optionsByFormat[option.format] = {
+                            format_desc: option.format_desc,
+                            options: []
+                        };
+                    }
+                    optionsByFormat[option.format].options.push(option);
+                });
+
+                // Create optgroups for each format
+                Object.keys(optionsByFormat).forEach(formatName => {
+                    const formatData = optionsByFormat[formatName];
+                    const optGroup = document.createElement('optgroup');
+                    optGroup.label = `${formatName} (${formatData.format_desc})`;
+
+                    // Add all options for this format
+                    formatData.options.forEach(option => {
+                        const optionElement = document.createElement('option');
+                        optionElement.value = option.value;
+                        optionElement.textContent = option.label;
+                        optGroup.appendChild(optionElement);
+                    });
+
+                    resolutionSelect.appendChild(optGroup);
+                });
+
+                // Set the current resolution if provided
+                if (currentResolution) {
+                    resolutionSelect.value = currentResolution;
+                    if (resolutionSelect.value !== currentResolution) {
+                        console.warn(`Current resolution "${currentResolution}" not found in dropdown options`);
+                    } else {
+                        console.log(`Set resolution dropdown to current value: ${currentResolution}`);
+                    }
+                }
+
+                resolutionSelect.disabled = false;
+                console.log(`Updated resolution dropdown with ${options.length} options`);
+            } else {
+                resolutionSelect.innerHTML = '<option value="">No resolutions available</option>';
+            }
         }
 
         // Load camera format and resolution options
