@@ -211,3 +211,7 @@ captures/
 recordings/
 samples/
 /test_outputs/
+
+*.avi
+*.mp4
+*.mkv

@@ -53,8 +53,6 @@ from perspective import Perspective
 from bullet_hole_detection import BulletHoleDetector
 from camera_controls import CameraControlManager
 from metadata_handler import MetadataHandler
-from threaded_capture import ThreadedCaptureSystem
-from camera_settings import CameraSettings
 
 
 class CameraController:
@@ -135,9 +133,6 @@ class CameraController:
         # Camera controls
         self.camera_controls = None  # Will be initialized when camera is opened
         self.cached_camera_controls = {'available': False, 'controls': {}}  # Cached controls from detection
-
-        # Threaded capture system
-        self.capture_system = None
 
     def generate_test_frame(self):
         """Generate a static test frame with useful information"""
@@ -353,61 +348,12 @@ class CameraController:
             except Exception as e:
                 print(f"WARNING: Failed to load perspective calibration: {e}")
 
-            print("DEBUG: Starting threaded capture system...")
-
-            # Create and start threaded capture system
-            self.capture_system = ThreadedCaptureSystem(
-                cap=self.cap,
-                source_type=self.source_type,
-                camera_index=self.camera_index,
-                buffer_size=self.buffer_size,
-                test_frame_generator=self.generate_test_frame if self.source_type == "test" else None
-            )
-            self.capture_system.start()
-
-            # Start processing loop for transformations and detection
-            threading.Thread(target=self._processing_loop, daemon=True).start()
-
+            print("DEBUG: Starting capture thread...")
+            threading.Thread(target=self._capture_loop, daemon=True).start()
             return True
         except Exception as e:
             print(f"Failed to initialize capture: {e}")
             return False
-
-    def _processing_loop(self):
-        """Processing loop for transformations, perspective correction, and detection"""
-        print("DEBUG: Processing loop started")
-
-        while self.running:
-            try:
-                # Get latest frame from capture system
-                raw_frame = self.capture_system.get_latest_frame() if self.capture_system else None
-
-                if raw_frame is not None:
-                    # Apply transformations (rotation, zoom, pan, perspective, detection)
-                    processed_frame = self._apply_transformations(raw_frame)
-
-                    # Update display frame (thread-safe)
-                    with self.lock:
-                        self.frame = processed_frame.copy()
-
-                    # Update playback position for video files
-                    if self.source_type == "video" and self.capture_system:
-                        pos = self.capture_system.get_playback_position()
-                        self.current_frame_number = pos['current_frame']
-                        self.total_frames = pos['total_frames']
-                        if not self.paused:
-                            self.display_frame_number = self.current_frame_number
-
-                # Sleep briefly to avoid busy-waiting (~100 FPS max processing rate)
-                time.sleep(0.01)
-
-            except Exception as e:
-                print(f"ERROR in _processing_loop: {e}")
-                import traceback
-                traceback.print_exc()
-                time.sleep(0.1)
-
-        print("DEBUG: Processing loop stopped")
 
     def _capture_loop(self):
         """Continuous frame capture and processing loop"""
@@ -784,86 +730,155 @@ class CameraController:
         return True
 
     def pause_playback(self):
-        """Pause video playback using threaded system"""
+        """Pause video playback"""
         if self.source_type == "video":
             self.paused = True
-            if self.capture_system:
-                self.capture_system.pause()
+            # Set pause buffer index to current position in buffer
+            self.pause_buffer_index = len(self.frame_buffer) - 1 if self.frame_buffer else 0
             # Record the frame number when we paused
             self.pause_frame_number = self.display_frame_number
             return True
         return False
 
     def resume_playback(self):
-        """Resume video playback using threaded system"""
+        """Resume video playback"""
         if self.source_type == "video":
             self.paused = False
-            if self.capture_system:
-                self.capture_system.resume()
             return True
         return False
 
     def step_frame_forward(self):
-        """Step one frame forward when paused using threaded system"""
+        """Step one frame forward when paused - works throughout entire video"""
         if self.source_type != "video" or not self.paused:
             return False
-
-        if not self.capture_system:
+            
+        target_frame = self.display_frame_number + 1
+        if target_frame >= self.total_frames:
+            return False  # Already at end
+            
+        try:
+            success, message = self.seek_to_frame(target_frame)
+            if success:
+                print(f"DEBUG: Step forward successful: {message}")
+            else:
+                print(f"DEBUG: Step forward failed: {message}")
+            return success
+        except Exception as e:
+            print(f"ERROR in step_frame_forward: {e}")
             return False
-
-        success = self.capture_system.step_forward()
-        if success:
-            # Update display frame number
-            pos = self.capture_system.get_playback_position()
-            self.display_frame_number = pos['current_frame']
-            print(f"DEBUG: Step forward to frame {self.display_frame_number}")
-        return success
 
     def step_frame_backward(self):
-        """Step one frame backward when paused using threaded system"""
+        """Step one frame backward when paused - works throughout entire video"""
         if self.source_type != "video" or not self.paused:
             return False
-
-        if not self.capture_system:
+            
+        target_frame = self.display_frame_number - 1
+        if target_frame < 0:
+            return False  # Already at start
+            
+        try:
+            success, message = self.seek_to_frame(target_frame)
+            if success:
+                print(f"DEBUG: Step backward successful: {message}")
+            else:
+                print(f"DEBUG: Step backward failed: {message}")
+            return success
+        except Exception as e:
+            print(f"ERROR in step_frame_backward: {e}")
             return False
 
-        success = self.capture_system.step_backward()
-        if success:
-            # Update display frame number
-            pos = self.capture_system.get_playback_position()
-            self.display_frame_number = pos['current_frame']
-            print(f"DEBUG: Step backward to frame {self.display_frame_number}")
-        return success
-
     def seek_to_frame(self, target_frame):
-        """Seek to a specific frame number using threaded system"""
+        """Seek to a specific frame number in video - SAFE VERSION"""
         if self.source_type != "video":
             return False, "Seek only works with video files"
-
-        if not self.capture_system:
-            return False, "Capture system not available"
-
-        # Validate frame number
-        if target_frame < 0:
-            target_frame = 0
-        elif self.total_frames > 0 and target_frame >= self.total_frames:
-            target_frame = self.total_frames - 1
-
-        print(f"DEBUG: Seeking to frame {target_frame}")
-
-        # Send seek command to capture system
-        success = self.capture_system.seek_to_frame(target_frame)
-
-        if success:
-            # Update frame counters
-            time.sleep(0.2)  # Give time for seek to complete
-            pos = self.capture_system.get_playback_position()
-            self.current_frame_number = pos['current_frame']
-            self.display_frame_number = pos['current_frame']
-            print(f"DEBUG: Seeked to frame {self.current_frame_number}")
-            return True, f"Seeked to frame {self.current_frame_number}"
-        else:
-            return False, f"Failed to seek to frame {target_frame}"
+        
+        # Thread safety: acquire lock for video operations
+        with self.lock:
+            if not self.cap or not self.cap.isOpened():
+                return False, "Video capture not available"
+            
+            # Validate frame number
+            original_target = target_frame
+            if target_frame < 0:
+                target_frame = 0
+            elif self.total_frames > 0 and target_frame >= self.total_frames:
+                target_frame = self.total_frames - 1
+            
+            # Store current position for potential rollback
+            current_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+            
+            try:
+                print(f"DEBUG: Seeking from frame {current_pos} to frame {target_frame}")
+                
+                # Attempt to set video position
+                success = self.cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+                if not success:
+                    print(f"WARNING: Failed to set frame position to {target_frame}")
+                    return False, f"Failed to seek to frame {target_frame}"
+                
+                # Verify the seek worked
+                actual_frame = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+                print(f"DEBUG: Actually seeked to frame {actual_frame}")
+                
+                # Update frame counters
+                self.current_frame_number = actual_frame
+                self.display_frame_number = actual_frame
+                
+                # Clear frame buffer since we've jumped to a new position
+                self.frame_buffer.clear()
+                self.pause_buffer_index = 0
+                
+                # Read and process the frame at the new position to update the display
+                try:
+                    ret, new_frame = self.cap.read()
+                    if ret and self._is_valid_frame(new_frame):
+                        # Apply transformations (rotation, zoom, pan, target detection, bullet holes)
+                        processed_frame = self._apply_transformations(new_frame)
+                        if self._is_valid_frame(processed_frame):
+                            # Update the display frame
+                            self.frame = processed_frame.copy()
+                            
+                            # Add to frame buffer for potential stepping
+                            self.frame_buffer.append(processed_frame.copy())
+                            
+                            print(f"DEBUG: Display frame updated for position {actual_frame}")
+                        else:
+                            print(f"WARNING: Frame transformation failed at position {actual_frame}")
+                            # Still update with original frame
+                            self.frame = new_frame.copy()
+                    else:
+                        print(f"WARNING: Cannot read frame at position {actual_frame}")
+                        # Try to restore original position
+                        try:
+                            self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+                            return False, f"No valid frame at position {target_frame}"
+                        except:
+                            return False, f"Seek failed and cannot restore position"
+                        
+                except Exception as e:
+                    print(f"WARNING: Failed to read frame at new position: {e}")
+                    # Try to restore original position
+                    try:
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+                        return False, f"Frame read failed after seek: {str(e)}"
+                    except:
+                        return False, f"Seek failed and cannot restore position"
+                
+                if actual_frame != original_target:
+                    return True, f"Seeked to frame {actual_frame} (requested {original_target})"
+                else:
+                    return True, f"Seeked to frame {actual_frame}"
+                
+            except Exception as e:
+                print(f"ERROR in seek_to_frame: {e}")
+                # Attempt to restore original position
+                try:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+                    print(f"DEBUG: Restored to original position {current_pos}")
+                except:
+                    print(f"ERROR: Cannot restore original position")
+                    
+                return False, f"Seek failed: {str(e)}"
 
     def is_paused(self):
         """Check if playback is paused"""
@@ -984,80 +999,134 @@ class CameraController:
         return self.bullet_hole_detector.get_debug_frame(frame_type)
 
     def start_recording(self):
-        """Start recording video to file using threaded system"""
+        """Start recording video to file"""
         if self.recording:
             return False, "Already recording"
 
         if self.source_type == "test":
             return False, "Cannot record test pattern"
 
-        if not self.capture_system:
-            return False, "Capture system not available"
+        if not self.cap or not self.cap.isOpened():
+            return False, "Camera/video source not available"
 
         # Generate filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_filename = f"recording_{timestamp}"
-        filepath = os.path.join(self.recordings_dir, base_filename)
+        self.recording_filename = f"recording_{timestamp}.mp4"
+        filepath = os.path.join(self.recordings_dir, self.recording_filename)
+
+        # Get dimensions directly from the capture device (before any rotation/processing)
+        # This ensures we record the raw frame dimensions
+        width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        if width <= 0 or height <= 0:
+            return False, f"Invalid frame dimensions: {width}x{height}"
+
+        # Store recording dimensions for validation
+        self.recording_width = width
+        self.recording_height = height
 
         # Determine recording FPS based on source type
         if self.source_type == "video":
+            # Use video file's native FPS
             fps = self.video_fps
+        elif self.cap and self.cap.isOpened():
+            # Try to get camera's actual FPS
+            actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            fps = actual_fps if actual_fps > 0 else 30.0
         else:
+            # Default fallback
             fps = 30.0
 
         # Clamp FPS to reasonable values
         fps = max(1.0, min(120.0, fps))
 
-        # Get camera controls metadata
+        # Try multiple codec options in order of preference
+        # Use MKV for MJPEG (better support), MP4 for H.264
+        codec_options = [
+            ('MJPG', '.mkv'),   # Motion JPEG in MKV (very low compression, stable, good metadata)
+            ('X264', '.mp4'),   # H.264 in MP4 (good quality, widely compatible)
+            ('avc1', '.mp4'),   # H.264 variant (alternative)
+            ('mp4v', '.mp4'),   # MPEG-4 (fallback)
+        ]
+
+        self.video_writer = None
+        for codec, ext in codec_options:
+            try:
+                # Update filename extension to match codec
+                test_filename = f"recording_{timestamp}{ext}"
+                test_filepath = os.path.join(self.recordings_dir, test_filename)
+
+                fourcc = cv2.VideoWriter_fourcc(*codec)
+                writer = cv2.VideoWriter(test_filepath, fourcc, fps, (width, height))
+
+                if writer.isOpened():
+                    self.video_writer = writer
+                    self.recording_filename = test_filename
+                    filepath = test_filepath
+                    print(f"Successfully initialized VideoWriter with codec: {codec}")
+                    break
+                else:
+                    writer.release()
+                    # Remove failed file if created
+                    if os.path.exists(test_filepath):
+                        os.remove(test_filepath)
+
+            except Exception as e:
+                print(f"Failed to initialize codec {codec}: {e}")
+                continue
+
+        if self.video_writer is None or not self.video_writer.isOpened():
+            return False, "Failed to initialize video writer with any available codec"
+
+        self.recording = True
+        self.recording_start_time = datetime.now()
+
+        # Save metadata for recording
         metadata = self._get_camera_controls_metadata()
+        metadata['recording_fps'] = fps
+        metadata['recording_resolution'] = f"{width}x{height}"
+        metadata['recording_codec'] = codec
 
-        # Start recording using threaded system (handles codec fallback automatically)
-        success, message, actual_filepath = self.capture_system.start_recording(
-            filepath,
-            fps=fps,
-            metadata=metadata
-        )
+        # Save metadata as JSON sidecar file
+        metadata_filename = f"recording_{timestamp}.json"
+        metadata_filepath = os.path.join(self.recordings_dir, metadata_filename)
+        with open(metadata_filepath, 'w') as f:
+            json.dump(metadata, f, indent=2)
 
-        if success:
-            self.recording = True
-            self.recording_start_time = datetime.now()
-            self.recording_filename = os.path.basename(actual_filepath)
-            print(f"Started recording: {actual_filepath}")
-            return True, message
-        else:
-            return False, message
+        print(f"Started recording to {filepath} at {width}x{height} @ {fps} fps")
+        return True, f"Recording started: {self.recording_filename} @ {fps:.1f} fps"
 
     def stop_recording(self):
-        """Stop recording video using threaded system"""
+        """Stop recording video and embed metadata"""
         if not self.recording:
             return False, "Not currently recording"
 
         self.recording = False
 
-        # Stop recording in threaded system (metadata already saved automatically)
-        if self.capture_system:
-            self.capture_system.stop_recording()
-
-        # Calculate recording duration and get file info
-        if self.recording_start_time and self.recording_filename:
-            duration = (datetime.now() - self.recording_start_time).total_seconds()
-            filepath = os.path.join(self.recordings_dir, self.recording_filename)
-
+        # Release video writer
+        if self.video_writer is not None:
             try:
-                if os.path.exists(filepath):
+                self.video_writer.release()
+                self.video_writer = None
+
+                # Calculate recording duration
+                if self.recording_start_time:
+                    duration = (datetime.now() - self.recording_start_time).total_seconds()
+                    filepath = os.path.join(self.recordings_dir, self.recording_filename)
                     filesize_mb = os.path.getsize(filepath) / (1024 * 1024)
                     message = f"Recording saved: {self.recording_filename} ({duration:.1f}s, {filesize_mb:.1f}MB)"
-
-                    # Embed metadata into video file using FFmpeg
-                    self._embed_video_metadata(filepath)
                 else:
                     message = f"Recording saved: {self.recording_filename}"
+
+                # Embed metadata into video file using FFmpeg
+                self._embed_video_metadata(filepath)
 
                 print(message)
                 return True, message
 
             except Exception as e:
-                return False, f"Error processing recording: {str(e)}"
+                return False, f"Error stopping recording: {str(e)}"
 
         return True, "Recording stopped"
 
@@ -1861,16 +1930,7 @@ class CameraController:
             except Exception as e:
                 print(f"WARNING: Error stopping recording: {e}")
 
-        # Stop the threaded capture system
-        if self.capture_system:
-            try:
-                print("DEBUG: Stopping capture system...")
-                self.capture_system.stop()
-                self.capture_system = None
-            except Exception as e:
-                print(f"WARNING: Error stopping capture system: {e}")
-
-        # Simple wait for threads to finish
+        # Simple wait for capture loop to notice running=False
         time.sleep(0.5)
 
         # Release capture device
