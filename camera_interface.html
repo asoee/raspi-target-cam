@@ -246,6 +246,12 @@
                     </div>
 
                     <div class="control-row">
+                        <label>Frame Rate:</label>
+                        <input type="range" id="fpsSlider" min="1" max="30" step="1" value="30" onchange="adjustFPS()" oninput="updateFPSDisplay()" disabled>
+                        <span class="value-display" id="fpsValue">30 fps</span>
+                    </div>
+
+                    <div class="control-row">
                         <label>Zoom:</label>
                         <input type="range" id="zoom" min="1" max="5" step="0.1" value="1" onchange="adjustZoom()" disabled>
                         <span id="zoomValue">1.0x</span>
@@ -680,7 +686,7 @@
         }
 
         function enableControls() {
-            const controls = ['videoSource', 'resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'perspectiveCorrection', 'debugMode', 'debugType', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn', 'setRefBtn'];
+            const controls = ['videoSource', 'resolution', 'fpsSlider', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'perspectiveCorrection', 'debugMode', 'debugType', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn', 'setRefBtn'];
             controls.forEach(id => {
                 document.getElementById(id).disabled = false;
             });
@@ -688,12 +694,12 @@
             // Enable debug stream buttons
             const debugButtons = document.querySelectorAll('.debug-stream-btn');
             debugButtons.forEach(btn => btn.disabled = false);
-            
+
             // Note: detectHolesBtn is enabled only after setting reference frame
         }
 
         function disableControls() {
-            const controls = ['videoSource', 'resolution', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'perspectiveCorrection', 'debugMode', 'debugType', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn'];
+            const controls = ['videoSource', 'resolution', 'fpsSlider', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'perspectiveCorrection', 'debugMode', 'debugType', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn'];
             controls.forEach(id => {
                 document.getElementById(id).disabled = true;
             });
@@ -705,7 +711,7 @@
 
         function updateControlsForVideoMode(isVideoMode, nativeResolution, nativeFps) {
             // Controls that should be disabled for video files
-            const videoRestrictedControls = ['resolution'];
+            const videoRestrictedControls = ['resolution', 'fpsSlider'];
 
             // Controls that work differently for video vs camera
             const modifiedControls = ['recordBtn'];
@@ -926,6 +932,32 @@
                     }
                 })
                 .catch(error => console.error('Pan error:', error));
+        }
+
+        function updateFPSDisplay() {
+            const fpsSlider = document.getElementById('fpsSlider');
+            const fpsValue = document.getElementById('fpsValue');
+            fpsValue.textContent = fpsSlider.value + ' fps';
+        }
+
+        function adjustFPS() {
+            const fps = parseInt(document.getElementById('fpsSlider').value);
+            updateFPSDisplay();
+
+            updateStatus(`🎬 Setting camera FPS to ${fps}...`, false);
+
+            apiCall('/api/fps', { fps: fps })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => {
+                    console.error('FPS error:', error);
+                    updateStatus(`❌ FPS change error: ${error}`, true);
+                });
         }
 
         function changeRotation() {
@@ -1748,6 +1780,12 @@
 
             const [width, height] = resolution.split('x').map(Number);
 
+            // Update FPS slider max to match the selected format's FPS
+            const fpsSlider = document.getElementById('fpsSlider');
+            fpsSlider.max = fps;
+            fpsSlider.value = fps;
+            updateFPSDisplay();
+
             // Send resolution change request
             apiCall('/api/set_resolution', {
                 width: width,
@@ -1886,6 +1924,15 @@
                     document.getElementById('debugMode').value = status.debug_mode ? 'true' : 'false';
                     document.getElementById('debugType').value = status.debug_type || 'combined';
                     document.getElementById('calibrationMode').value = status.calibration_mode ? 'true' : 'false';
+
+                    // Update FPS slider with current/actual FPS
+                    const fpsSlider = document.getElementById('fpsSlider');
+                    if (status.actual_fps) {
+                        const currentFPS = Math.round(status.actual_fps);
+                        fpsSlider.value = currentFPS;
+                        fpsSlider.max = Math.max(currentFPS, 30);  // At least 30 or current FPS
+                        updateFPSDisplay();
+                    }
 
                     const resSelect = document.getElementById('resolution');
                     const currentRes = `${status.resolution[0]}x${status.resolution[1]}`;

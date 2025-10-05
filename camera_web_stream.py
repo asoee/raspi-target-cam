@@ -71,6 +71,7 @@ class CameraController:
 
         # Camera settings
         self.resolution = (2592, 1944)
+        self.camera_fps = None  # None = use camera default, or set specific FPS
         self.zoom = 1.0
         self.pan_x = 0
         self.pan_y = 0
@@ -276,6 +277,16 @@ class CameraController:
                         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[0])
                         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[1])
                         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+                        # Set FPS if specified
+                        if self.camera_fps is not None:
+                            self.cap.set(cv2.CAP_PROP_FPS, self.camera_fps)
+                            actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                            print(f"DEBUG: Requested FPS: {self.camera_fps}, Actual FPS: {actual_fps}")
+                        else:
+                            actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                            print(f"DEBUG: Using camera default FPS: {actual_fps}")
+
                         print(f"DEBUG: Camera properties set")
                     except Exception as e:
                         print(f"WARNING: Could not set camera properties: {e}")
@@ -748,6 +759,34 @@ class CameraController:
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         return True
+
+    def set_fps(self, fps):
+        """Change camera FPS (only works for cameras, not video files)
+
+        Args:
+            fps: Desired FPS value, or None to use camera default
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if self.source_type == "video":
+            # Cannot change FPS for video files
+            return False
+
+        self.camera_fps = fps
+        if self.cap and self.cap.isOpened():
+            if fps is not None:
+                self.cap.set(cv2.CAP_PROP_FPS, fps)
+                actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                print(f"FPS set: requested {fps}, actual {actual_fps}")
+            else:
+                actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                print(f"FPS using camera default: {actual_fps}")
+            return True
+        else:
+            # Camera not active yet, just store the setting
+            print(f"FPS setting stored (will apply when camera starts): {fps if fps is not None else 'default'}")
+            return True
 
     def set_zoom(self, zoom_level):
         """Set zoom level (1.0 to 5.0)"""
@@ -1821,6 +1860,7 @@ class CameraController:
             'resolution': self.resolution,
             'actual_resolution': current_resolution,
             'actual_fps': current_fps,
+            'camera_fps': self.camera_fps,  # Configured FPS (None = default)
             'zoom': self.zoom,
             'pan_x': self.pan_x,
             'pan_y': self.pan_y,
@@ -2132,6 +2172,16 @@ class StreamingHandler(BaseHTTPRequestHandler):
                     response = {'success': True, 'message': f'Rotation set to {rotation}°'}
                 else:
                     response = {'success': False, 'message': 'Invalid rotation (must be 0, 90, 180, or 270)'}
+
+            elif path == '/api/fps':
+                fps = data.get('fps')
+                if camera_controller.set_fps(fps):
+                    if fps is None:
+                        response = {'success': True, 'message': 'FPS set to camera default'}
+                    else:
+                        response = {'success': True, 'message': f'FPS set to {fps}'}
+                else:
+                    response = {'success': False, 'message': 'Failed to set FPS (camera must be active)'}
 
             elif path == '/api/target_detection':
                 enabled = data.get('enabled', True)
