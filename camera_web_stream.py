@@ -52,9 +52,7 @@ from target_detection import TargetDetector
 from perspective import Perspective
 from bullet_hole_detection import BulletHoleDetector
 from camera_controls import CameraControlManager
-from PIL import Image
-from PIL.ExifTags import TAGS
-import piexif
+from metadata_handler import MetadataHandler
 
 
 class CameraController:
@@ -922,109 +920,26 @@ class CameraController:
 
     def _get_camera_controls_metadata(self):
         """Get current camera controls as metadata dictionary"""
-        metadata = {}
-
-        # Add timestamp
-        metadata['capture_timestamp'] = datetime.now().isoformat()
-
-        # Add source information
-        metadata['source_type'] = self.source_type
+        source_info = {}
         if self.source_type == 'video':
-            metadata['video_file'] = self.video_file or 'unknown'
+            source_info['video_file'] = self.video_file or 'unknown'
         elif self.source_type == 'camera':
-            metadata['camera_index'] = self.camera_index
+            source_info['camera_index'] = self.camera_index
 
-        # Add camera settings
-        metadata['resolution'] = f"{self.resolution[0]}x{self.resolution[1]}"
-        metadata['zoom'] = self.zoom
-        metadata['rotation'] = self.rotation
+        settings = {
+            'resolution': self.resolution,
+            'zoom': self.zoom,
+            'rotation': self.rotation,
+            'perspective_correction': self.perspective_correction_enabled
+        }
 
-        # Add camera controls if available
-        if self.cached_camera_controls.get('available'):
-            controls = self.cached_camera_controls.get('controls', {})
-            for name, info in controls.items():
-                current_value = info.get('current')
-                if current_value is not None:
-                    metadata[f'camera_{name}'] = current_value
-
-        # Add detection settings
-        metadata['perspective_correction'] = self.perspective_correction_enabled
-
-        return metadata
+        return MetadataHandler.get_camera_controls_metadata(
+            self.source_type, source_info, settings, self.cached_camera_controls
+        )
 
     def _embed_video_metadata(self, video_filepath):
         """Embed metadata into video file using FFmpeg"""
-        try:
-            # Read the metadata JSON file
-            base_name = os.path.splitext(video_filepath)[0]
-            metadata_filepath = f"{base_name}.json"
-
-            if not os.path.exists(metadata_filepath):
-                print(f"Warning: Metadata file not found: {metadata_filepath}")
-                return
-
-            with open(metadata_filepath, 'r') as f:
-                metadata = json.load(f)
-
-            # Create temporary output file
-            temp_filepath = f"{base_name}_temp{os.path.splitext(video_filepath)[1]}"
-
-            # Build FFmpeg command with metadata tags
-            cmd = ['ffmpeg', '-i', video_filepath, '-codec', 'copy']
-
-            # Add standard metadata tags
-            cmd.extend(['-metadata', f'title=Raspberry Pi Target Camera Recording'])
-
-            # Add all metadata values as individual tags
-            # FFmpeg metadata keys should not have spaces or special characters
-            for key, value in metadata.items():
-                # Convert the key to a valid metadata tag name
-                # Replace underscores and make it more readable
-                if key == 'capture_timestamp':
-                    cmd.extend(['-metadata', f'date={value}'])
-                    cmd.extend(['-metadata', f'{key}={value}'])
-                elif key.startswith('camera_'):
-                    # Add both with and without 'camera_' prefix
-                    clean_key = key.replace('camera_', '')
-                    cmd.extend(['-metadata', f'{clean_key}={value}'])
-                    cmd.extend(['-metadata', f'{key}={value}'])
-                elif key == 'video_file':
-                    cmd.extend(['-metadata', f'source_file={value}'])
-                    cmd.extend(['-metadata', f'{key}={value}'])
-                elif key == 'camera_index':
-                    cmd.extend(['-metadata', f'camera={value}'])
-                    cmd.extend(['-metadata', f'{key}={value}'])
-                else:
-                    # Add all other metadata as-is
-                    cmd.extend(['-metadata', f'{key}={value}'])
-
-            # Add complete metadata as comment field (JSON string) for programmatic access
-            metadata_json = json.dumps(metadata).replace('"', '\\"')  # Escape quotes
-            cmd.extend(['-metadata', f'comment={metadata_json}'])
-
-            # Output to temp file
-            cmd.extend(['-y', temp_filepath])  # -y to overwrite without asking
-
-            # Run FFmpeg
-            result = subprocess.run(cmd, capture_output=True, text=True)
-
-            if result.returncode == 0:
-                # Replace original file with metadata-embedded version
-                os.replace(temp_filepath, video_filepath)
-                print(f"Successfully embedded metadata into {os.path.basename(video_filepath)}")
-
-                # Delete the JSON sidecar file since metadata is now embedded
-                if os.path.exists(metadata_filepath):
-                    os.remove(metadata_filepath)
-                    print(f"Removed JSON sidecar file: {os.path.basename(metadata_filepath)}")
-            else:
-                print(f"Warning: FFmpeg failed to embed metadata: {result.stderr}")
-                # Clean up temp file if it exists
-                if os.path.exists(temp_filepath):
-                    os.remove(temp_filepath)
-
-        except Exception as e:
-            print(f"Error embedding video metadata: {e}")
+        MetadataHandler.embed_video_metadata(video_filepath)
 
     def capture_image(self):
         """Capture and save current frame with camera controls metadata as EXIF tags"""
@@ -1040,33 +955,8 @@ class CameraController:
                 # First save with OpenCV
                 cv2.imwrite(filepath, self.frame)
 
-                # Load image with PIL to add EXIF data
-                img = Image.open(filepath)
-
-                # Create EXIF data
-                exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
-
-                # Add metadata to UserComment (can store JSON)
-                metadata_json = json.dumps(metadata)
-                exif_dict["Exif"][piexif.ExifIFD.UserComment] = metadata_json.encode('utf-8')
-
-                # Add timestamp to DateTimeOriginal
-                dt = datetime.now()
-                datetime_str = dt.strftime("%Y:%m:%d %H:%M:%S")
-                exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = datetime_str.encode('utf-8')
-                exif_dict["0th"][piexif.ImageIFD.DateTime] = datetime_str.encode('utf-8')
-
-                # Add camera make/model from metadata
-                exif_dict["0th"][piexif.ImageIFD.Make] = b"Raspberry Pi"
-                exif_dict["0th"][piexif.ImageIFD.Model] = f"Target Camera (Source: {self.source_type})".encode('utf-8')
-
-                # Add image description with key settings
-                description = f"Resolution: {metadata.get('resolution')}, Zoom: {metadata.get('zoom')}, Rotation: {metadata.get('rotation')}"
-                exif_dict["0th"][piexif.ImageIFD.ImageDescription] = description.encode('utf-8')
-
-                # Encode and save
-                exif_bytes = piexif.dump(exif_dict)
-                img.save(filepath, "jpeg", exif=exif_bytes, quality=95)
+                # Embed metadata as EXIF
+                MetadataHandler.embed_image_metadata(filepath, metadata)
 
                 return filename
         return None
