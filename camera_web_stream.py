@@ -66,7 +66,8 @@ class CameraController:
         self.video_file = None
         self.source_type = "test"  # Start with test pattern to avoid camera hang
         self.cap = None
-        self.frame = None
+        self.frame = None  # Processed frame (with overlays, transformations, etc.)
+        self.raw_frame = None  # Raw frame without any processing (for calibration)
         self.running = False
         self.lock = threading.Lock()
 
@@ -396,11 +397,12 @@ class CameraController:
 
                 if raw_frame is not None:
                     # Apply transformations (rotation, zoom, pan, perspective, detection)
+                    # Note: _apply_transformations stores the rotated frame as self.raw_frame
                     processed_frame = self._apply_transformations(raw_frame)
 
                     # Update display frame (thread-safe)
                     with self.lock:
-                        self.frame = processed_frame.copy()
+                        self.frame = processed_frame.copy()  # Store processed frame for streaming
 
                     # Update playback position for video files
                     if self.source_type == "video" and self.capture_system:
@@ -434,7 +436,8 @@ class CameraController:
                     # Generate test frame
                     test_frame = self.generate_test_frame()
                     with self.lock:
-                        self.frame = test_frame.copy()
+                        self.raw_frame = test_frame.copy()  # Store raw frame for calibration
+                        self.frame = test_frame.copy()  # Store same frame for streaming (test has no overlays)
                     time.sleep(0.2)  # 10 FPS for test frame updates
                     continue
                 
@@ -536,8 +539,9 @@ class CameraController:
                     if not self.paused and self.source_type == "video":
                         self.display_frame_number = self.current_frame_number
 
+                    # Note: _apply_transformations already stored rotated frame as self.raw_frame
                     with self.lock:
-                        self.frame = processed_frame.copy()
+                        self.frame = processed_frame.copy()  # Store processed frame for streaming
                 else:
                     # If video file reached end, loop back to beginning
                     if self.source_type == "video":
@@ -596,6 +600,11 @@ class CameraController:
         # Apply rotation first
         if self.rotation != 0:
             frame = self._rotate_frame(frame, self.rotation)
+
+        # Store rotated frame as raw frame (for calibration - includes rotation but no overlays)
+        # This must be stored here before target detection overlays are added
+        with self.lock:
+            self.raw_frame = frame.copy()
 
         # Handle perspective correction and target detection together
         if self.perspective_correction_enabled:
@@ -1396,16 +1405,17 @@ class CameraController:
         """Perform perspective calibration using current frame"""
         try:
             with self.lock:
-                if self.frame is not None:
+                # Use raw frame (without target detection overlays) for calibration
+                if self.raw_frame is not None:
                     # Validate frame before calibration
-                    if not self._is_valid_frame(self.frame):
+                    if not self._is_valid_frame(self.raw_frame):
                         return False, "Current frame is invalid for calibration"
 
-                    print("DEBUG: Starting perspective calibration...")
-                    print(f"DEBUG: Frame shape: {self.frame.shape}, dtype: {self.frame.dtype}")
+                    print("DEBUG: Starting perspective calibration with raw frame...")
+                    print(f"DEBUG: Frame shape: {self.raw_frame.shape}, dtype: {self.raw_frame.dtype}")
 
                     # Make a copy to ensure memory safety
-                    frame_copy = self.frame.copy()
+                    frame_copy = self.raw_frame.copy()
 
                     # Ensure proper data type for calibration
                     if frame_copy.dtype != 'uint8':
@@ -1419,7 +1429,7 @@ class CameraController:
 
                     return success, message
                 else:
-                    return False, "No frame available for calibration"
+                    return False, "No raw frame available for calibration"
         except Exception as e:
             print(f"ERROR in calibrate_perspective: {e}")
             import traceback
