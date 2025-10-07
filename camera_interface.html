@@ -553,7 +553,7 @@
                         <label>Debug Streams:</label>
                         <div class="debug-stream-buttons">
                             <button onclick="openDebugStream('combined')" disabled class="debug-stream-btn">🔀 Combined</button>
-                            <button onclick="openDebugStream('perspective')" disabled class="debug-stream-btn">📐 Perspective</button>
+                            <button onclick="openPerspectiveUI()" disabled class="debug-stream-btn">📐 Perspective Adjust</button>
                             <button onclick="openDebugStream('circles')" disabled class="debug-stream-btn">⭕ Circles</button>
                             <button onclick="openDebugStream('corrected')" disabled class="debug-stream-btn">🔧 Corrected</button>
                         </div>
@@ -1031,6 +1031,15 @@
 
             window.open(debugUrl, windowName, windowFeatures);
             updateStatus(`🔍 ${debugType.charAt(0).toUpperCase() + debugType.slice(1)} debug stream opened in new window`, false);
+        }
+
+        function openPerspectiveUI() {
+            const perspectiveUrl = '/perspective';
+            const windowName = 'perspectiveAdjustment';
+            const windowFeatures = 'width=1400,height=900,scrollbars=yes,resizable=yes';
+
+            window.open(perspectiveUrl, windowName, windowFeatures);
+            updateStatus('📐 Perspective adjustment UI opened in new window', false);
         }
 
         function changeDebugType() {

@@ -913,7 +913,8 @@ class Perspective:
     def calibrate_perspective(self, frame):
         """Perform on-demand perspective calibration"""
         # Store the ellipse data when calibration succeeds
-        ellipse_matrix, detected_ellipse, debug_frame = self.detect_ellipse_perspective_transform(frame)
+        # Always enable debug mode during calibration to generate visualization
+        ellipse_matrix, detected_ellipse, debug_frame = self.detect_ellipse_perspective_transform(frame, debug_mode=True)
         if ellipse_matrix is not None:
             self.saved_perspective_matrix = ellipse_matrix
             # Store ellipse data from the debug info if available

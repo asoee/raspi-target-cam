@@ -36,8 +36,16 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 query_params = parse_qs(parsed_path.query)
                 debug_type = query_params.get('type', ['combined'])[0]  # Default to 'combined'
                 self._serve_debug_stream(debug_type)
+            elif path == '/perspective_debug.mjpg':
+                # Dedicated perspective debug stream (always on, independent of debug mode)
+                self._serve_perspective_debug_stream()
+            elif path == '/corrected.mjpg':
+                # Dedicated corrected frame stream (always on, independent of debug mode)
+                self._serve_corrected_stream()
             elif path == '/' or path == '/index.html':
                 self._serve_file('camera_interface.html')
+            elif path == '/perspective' or path == '/perspective.html':
+                self._serve_file('perspective_adjustment.html')
             elif path == '/api/status':
                 self._serve_api_status()
             elif path == '/api/sources':
@@ -177,6 +185,117 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 time.sleep(0.2)  # 5 FPS for debug stream
         except Exception as e:
             print(f"Debug stream client disconnected: {e}")
+
+    def _serve_perspective_debug_stream(self):
+        """Serve MJPEG stream with perspective detection visualization
+
+        Shows the cached debug frame from the last calibration attempt.
+        Detection is triggered manually via the calibrate_perspective API.
+        """
+        self.send_response(200)
+        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+
+        try:
+            while True:
+                # Get the cached debug frame from the last calibration
+                debug_frame = self.camera_controller.perspective.get_debug_frame()
+
+                if debug_frame is not None:
+                    # Use the cached debug visualization
+                    _, buffer = cv2.imencode('.jpg', debug_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    frame_data = buffer.tobytes()
+
+                    self.wfile.write(b'--frame\r\n')
+                    self.send_header('Content-Type', 'image/jpeg')
+                    self.send_header('Content-Length', str(len(frame_data)))
+                    self.end_headers()
+                    self.wfile.write(frame_data)
+                    self.wfile.write(b'\r\n')
+                else:
+                    # No debug frame available - show instructions
+                    self._send_placeholder_frame(
+                        "Perspective Detection",
+                        "Click 'Auto-Calibrate' to detect ellipse"
+                    )
+
+                time.sleep(0.1)  # 10 FPS for stream updates
+        except Exception as e:
+            print(f"Perspective debug stream client disconnected: {e}")
+
+    def _serve_corrected_stream(self):
+        """Serve MJPEG stream with perspective-corrected frames
+
+        This stream always shows corrected frames when perspective correction is enabled,
+        independent of debug mode. Falls back to original frame if correction is disabled.
+        """
+        self.send_response(200)
+        self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+
+        try:
+            while True:
+                # Get current frame from camera controller
+                with self.camera_controller.lock:
+                    frame = self.camera_controller.frame.copy() if self.camera_controller.frame is not None else None
+
+                if frame is not None:
+                    # Try to apply perspective correction
+                    if self.camera_controller.perspective_correction_enabled:
+                        corrected_frame = self.camera_controller.perspective.apply_perspective_correction(frame)
+                        if corrected_frame is not None:
+                            frame = corrected_frame
+                        else:
+                            # Add text overlay indicating correction failed
+                            frame = frame.copy()
+                            cv2.putText(frame, "Perspective correction not calibrated", (10, 30),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    else:
+                        # Add text overlay indicating correction is disabled
+                        frame = frame.copy()
+                        cv2.putText(frame, "Perspective correction disabled", (10, 30),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 128, 0), 2)
+
+                    # Encode as JPEG
+                    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    frame_data = buffer.tobytes()
+
+                    self.wfile.write(b'--frame\r\n')
+                    self.send_header('Content-Type', 'image/jpeg')
+                    self.send_header('Content-Length', str(len(frame_data)))
+                    self.end_headers()
+                    self.wfile.write(frame_data)
+                    self.wfile.write(b'\r\n')
+                else:
+                    self._send_placeholder_frame("Corrected Stream", "No frame available")
+
+                time.sleep(0.05)  # 20 FPS for corrected stream
+        except Exception as e:
+            print(f"Corrected stream client disconnected: {e}")
+
+    def _send_placeholder_frame(self, title, message):
+        """Helper method to send a placeholder frame with a message"""
+        img = np.zeros((480, 640, 3), dtype=np.uint8)
+        img.fill(50)  # Dark gray background
+
+        cv2.putText(img, title, (160, 200),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+        cv2.putText(img, message, (140, 280),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+        _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        placeholder = buffer.tobytes()
+
+        self.wfile.write(b'--frame\r\n')
+        self.send_header('Content-Type', 'image/jpeg')
+        self.send_header('Content-Length', str(len(placeholder)))
+        self.end_headers()
+        self.wfile.write(placeholder)
+        self.wfile.write(b'\r\n')
 
     def _serve_file(self, filename):
         """Serve static files"""
