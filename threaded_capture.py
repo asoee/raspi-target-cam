@@ -32,6 +32,7 @@ class FrameBuffer:
         self.lock = threading.Lock()
         self.latest_frame = None
         self.frame_count = 0
+        self.frame_change_counter = 0  # Increments each time a new frame is added
 
     def put(self, frame):
         """Add frame to buffer (thread-safe)"""
@@ -39,13 +40,20 @@ class FrameBuffer:
             self.buffer.append(frame.copy())
             self.latest_frame = frame.copy()
             self.frame_count += 1
+            self.frame_change_counter += 1  # Increment change counter
 
     def get_latest(self):
-        """Get the most recent frame (non-blocking)"""
+        """
+        Get the most recent frame with change counter (non-blocking).
+
+        Returns:
+            Tuple of (frame, change_counter) where change_counter increments
+            each time a new frame is added to the buffer
+        """
         with self.lock:
             if self.latest_frame is not None:
-                return self.latest_frame.copy()
-            return None
+                return self.latest_frame.copy(), self.frame_change_counter
+            return None, 0
 
     def get_buffer_copy(self):
         """Get a copy of the entire buffer"""
@@ -529,8 +537,21 @@ class ThreadedCaptureSystem:
             self.frame_reader.resume()
 
     def get_latest_frame(self):
-        """Get the most recent frame"""
-        return self.frame_buffer.get_latest()
+        """
+        Get the most recent frame with playback position and change counter.
+
+        Returns:
+            Tuple of (frame, position_dict) where position_dict contains:
+            - current_frame: Frame number (0 for camera, actual frame for video)
+            - total_frames: Total frames (0 for camera)
+            - source_type: Type of source ('camera', 'video', 'test')
+            - change_counter: Increments each time a new frame is captured
+        """
+        frame, change_counter = self.frame_buffer.get_latest()
+        position = self.get_playback_position()
+        position['source_type'] = self.source_type
+        position['change_counter'] = change_counter
+        return frame, position
 
     def start_recording(self, output_file, fps=30, frame_size=None, metadata=None, codec_priority=None):
         """

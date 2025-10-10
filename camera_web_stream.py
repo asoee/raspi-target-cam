@@ -390,12 +390,29 @@ class CameraController:
         """Processing loop for transformations, perspective correction, and detection"""
         print("DEBUG: Processing loop started")
 
+        last_processed_change_counter = -1  # Track last processed frame using change counter
+
         while self.running:
             try:
-                # Get latest frame from capture system
-                raw_frame = self.capture_system.get_latest_frame() if self.capture_system else None
+                # Get latest frame with playback position from capture system
+                if self.capture_system:
+                    raw_frame, position = self.capture_system.get_latest_frame()
+                else:
+                    raw_frame, position = None, {'current_frame': 0, 'total_frames': 0, 'source_type': 'unknown', 'change_counter': 0}
 
                 if raw_frame is not None:
+                    change_counter = position.get('change_counter', 0)
+
+                    # Skip processing if it's the same frame as last time
+                    # Use change_counter which works for all source types (camera, video, test)
+                    if change_counter == last_processed_change_counter:
+                        # Frame hasn't changed, skip processing
+                        time.sleep(0.01)
+                        continue
+
+                    # Update last processed change counter
+                    last_processed_change_counter = change_counter
+
                     # Apply transformations (rotation, zoom, pan, perspective, detection)
                     # Note: _apply_transformations stores the rotated frame as self.raw_frame
                     processed_frame = self._apply_transformations(raw_frame)
@@ -405,10 +422,9 @@ class CameraController:
                         self.frame = processed_frame.copy()  # Store processed frame for streaming
 
                     # Update playback position for video files
-                    if self.source_type == "video" and self.capture_system:
-                        pos = self.capture_system.get_playback_position()
-                        self.current_frame_number = pos['current_frame']
-                        self.total_frames = pos['total_frames']
+                    if self.source_type == "video":
+                        self.current_frame_number = position['current_frame']
+                        self.total_frames = position['total_frames']
                         if not self.paused:
                             self.display_frame_number = self.current_frame_number
 
@@ -610,21 +626,18 @@ class CameraController:
         if self.perspective_correction_enabled:
             corrected_frame = self.perspective.apply_perspective_correction(frame)
             if corrected_frame is not None:
-                # Run target detection on the corrected frame for better accuracy
-                # This ensures detection works on the geometrically corrected image
-                frame = self.target_detector.draw_target_overlay(corrected_frame, 
-                                                               target_info=self.target_detector.detect_target(corrected_frame), 
-                                                               frame_is_corrected=True)
-            else:
-                # Perspective correction failed, run detection on original frame
-                frame = self.target_detector.draw_target_overlay(frame, 
-                                                               target_info=self.target_detector.detect_target(frame), 
-                                                               frame_is_corrected=False)
-        else:
-            # No perspective correction, run target detection on original frame
-            frame = self.target_detector.draw_target_overlay(frame, 
-                                                           target_info=self.target_detector.detect_target(frame), 
-                                                           frame_is_corrected=False)
+                frame = corrected_frame
+        # if self.target_detection
+        #     else:
+        #         # Perspective correction failed, run detection on original frame
+        #         frame = self.target_detector.draw_target_overlay(frame, 
+        #                                                        target_info=self.target_detector.detect_target(frame), 
+        #                                                        frame_is_corrected=False)
+        # else:
+        #     # No perspective correction, run target detection on original frame
+        #     frame = self.target_detector.draw_target_overlay(frame, 
+        #                                                    target_info=self.target_detector.detect_target(frame), 
+        #                                                    frame_is_corrected=False)
         
         # Add bullet hole overlays if any have been detected
         if self.bullet_holes:
