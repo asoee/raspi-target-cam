@@ -126,6 +126,8 @@ class FrameReader(threading.Thread):
         self.current_frame_number = 0
         self.total_frames = 0
         self.loop_video = True  # Loop video when it reaches end
+        self.pending_seek = False  # Flag to indicate a seek just happened
+        self.frame_lock = threading.Lock()  # Lock for frame number updates
 
         # Test pattern support
         self.test_frame_generator = test_frame_generator
@@ -156,8 +158,25 @@ class FrameReader(threading.Thread):
                 # Process commands from queue (non-blocking)
                 self._process_commands()
 
-                # Skip reading if paused (but keep thread alive)
+                # When paused, process commands but don't advance playback
                 if self.paused:
+                    # If we just seeked, read the frame at the new position
+                    if self.pending_seek and self.source_type == "video" and self.cap and self.cap.isOpened():
+                        # Read the frame at the seeked position
+                        ret, frame = self.cap.read()
+                        if ret and frame is not None:
+                            if (hasattr(frame, 'shape') and
+                                len(frame.shape) >= 2 and
+                                frame.shape[0] > 0 and
+                                frame.shape[1] > 0 and
+                                frame.size > 0):
+                                # Put frame in buffer so it gets displayed
+                                self.frame_buffer.put(frame)
+                                print(f"FrameReader: Read frame {self.current_frame_number} after seek while paused")
+
+                        # Clear the pending seek flag
+                        self.pending_seek = False
+
                     time.sleep(0.1)
                     continue
 
@@ -187,7 +206,8 @@ class FrameReader(threading.Thread):
                         frame.size > 0):
                         # Update frame number for video files
                         if self.source_type == "video":
-                            self.current_frame_number = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+                            with self.frame_lock:
+                                self.current_frame_number = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
 
                         # Add to buffer
                         self.frame_buffer.put(frame)
@@ -208,7 +228,8 @@ class FrameReader(threading.Thread):
                         if self.loop_video:
                             print("FrameReader: Video ended, looping...")
                             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                            self.current_frame_number = 0
+                            with self.frame_lock:
+                                self.current_frame_number = 0
                         else:
                             print("FrameReader: Video ended, pausing...")
                             self.paused = True
@@ -266,21 +287,59 @@ class FrameReader(threading.Thread):
         processed = 0
         max_commands_per_cycle = 10  # Prevent command processing from blocking frame capture
 
+        # Optimization: Aggregate multiple seek commands
+        # If there are multiple SeekCommands queued, only execute the last one
+        pending_commands = []
+        last_seek_command = None
+
+        # Collect all pending commands
         while processed < max_commands_per_cycle:
             try:
-                # Non-blocking get
                 command = self.command_queue.get_nowait()
 
-                # Execute command on capture device (only this thread accesses cap)
-                if self.cap and self.cap.isOpened():
-                    command.execute(self.cap)
+                # If it's a seek command, keep only the latest one
+                if isinstance(command, SeekCommand):
+                    if last_seek_command is not None:
+                        # Discard the previous seek, keep the newer one
+                        print(f"FrameReader: Skipping seek to frame {last_seek_command.frame_number} (aggregating)")
+                    last_seek_command = command
+                else:
+                    # Non-seek commands are executed in order
+                    pending_commands.append(command)
 
                 processed += 1
-
             except queue.Empty:
                 break
             except Exception as e:
+                print(f"FrameReader: Error reading command: {e}")
+                import traceback
+                traceback.print_exc()
+
+        # Execute non-seek commands first
+        for command in pending_commands:
+            try:
+                if self.cap and self.cap.isOpened():
+                    command.execute(self.cap)
+            except Exception as e:
                 print(f"FrameReader: Error executing command: {e}")
+                import traceback
+                traceback.print_exc()
+
+        # Execute the last seek command (if any)
+        if last_seek_command is not None:
+            try:
+                if self.cap and self.cap.isOpened():
+                    last_seek_command.execute(self.cap)
+
+                    # After seek commands, update current frame number immediately
+                    # This is important when paused since we won't read frames
+                    if self.source_type == "video":
+                        with self.frame_lock:
+                            self.current_frame_number = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+                            self.pending_seek = True  # Set flag to trigger frame read when paused
+                            print(f"FrameReader: Frame position updated to {self.current_frame_number} after seek")
+            except Exception as e:
+                print(f"FrameReader: Error executing seek command: {e}")
                 import traceback
                 traceback.print_exc()
 
@@ -322,18 +381,60 @@ class FrameReader(threading.Thread):
         """Step one frame forward (for video files)"""
         if self.source_type != "video":
             return False
-        target_frame = self.current_frame_number + 1
-        if target_frame >= self.total_frames:
-            return False
+        with self.frame_lock:
+            target_frame = self.current_frame_number + 1
+            if target_frame >= self.total_frames:
+                return False
+            # Update frame number optimistically before seek completes
+            # This prevents duplicate seeks when step is called rapidly
+            self.current_frame_number = target_frame
         return self.seek_to_frame(target_frame)
 
     def step_backward(self) -> bool:
         """Step one frame backward (for video files)"""
         if self.source_type != "video":
             return False
-        target_frame = self.current_frame_number - 1
-        if target_frame < 0:
+        with self.frame_lock:
+            target_frame = self.current_frame_number - 1
+            if target_frame < 0:
+                return False
+            # Update frame number optimistically before seek completes
+            # This prevents duplicate seeks when step is called rapidly
+            self.current_frame_number = target_frame
+        return self.seek_to_frame(target_frame)
+
+    def step_seconds(self, seconds: float, forward: bool = True) -> bool:
+        """
+        Step forward or backward by a specified number of seconds.
+
+        Args:
+            seconds: Number of seconds to step (can be fractional)
+            forward: True to step forward, False to step backward
+
+        Returns:
+            True if step was successful, False otherwise
+        """
+        if self.source_type != "video":
             return False
+
+        # Calculate frame offset based on FPS
+        frame_offset = int(seconds * self.fps)
+        if frame_offset == 0:
+            frame_offset = 1  # Minimum 1 frame
+
+        with self.frame_lock:
+            if forward:
+                target_frame = self.current_frame_number + frame_offset
+                if target_frame >= self.total_frames:
+                    target_frame = self.total_frames - 1
+            else:
+                target_frame = self.current_frame_number - frame_offset
+                if target_frame < 0:
+                    target_frame = 0
+
+            # Update frame number optimistically
+            self.current_frame_number = target_frame
+
         return self.seek_to_frame(target_frame)
 
     def get_playback_position(self) -> dict:
@@ -344,10 +445,13 @@ class FrameReader(threading.Thread):
             Dictionary with current_frame, total_frames, progress
         """
         if self.source_type == "video":
-            progress = (self.current_frame_number / self.total_frames * 100) if self.total_frames > 0 else 0
+            with self.frame_lock:
+                current = self.current_frame_number
+                total = self.total_frames
+            progress = (current / total * 100) if total > 0 else 0
             return {
-                'current_frame': self.current_frame_number,
-                'total_frames': self.total_frames,
+                'current_frame': current,
+                'total_frames': total,
                 'progress': progress
             }
         return {'current_frame': 0, 'total_frames': 0, 'progress': 0}
@@ -814,6 +918,21 @@ class ThreadedCaptureSystem:
         """Step one frame backward (video files only)"""
         if self.frame_reader:
             return self.frame_reader.step_backward()
+        return False
+
+    def step_seconds(self, seconds: float, forward: bool = True) -> bool:
+        """
+        Step forward or backward by a specified number of seconds (video files only).
+
+        Args:
+            seconds: Number of seconds to step
+            forward: True to step forward, False to step backward
+
+        Returns:
+            True if step was successful
+        """
+        if self.frame_reader:
+            return self.frame_reader.step_seconds(seconds, forward)
         return False
 
     def get_playback_position(self) -> dict:

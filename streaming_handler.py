@@ -601,6 +601,20 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 else:
                     response = {'success': False, 'message': 'Cannot step backward (not paused or at beginning)'}
 
+            elif path == '/api/playback_step_seconds':
+                seconds = data.get('seconds', 1)
+                forward = data.get('forward', True)
+                if forward:
+                    if self.camera_controller.step_seconds_forward(seconds):
+                        response = {'success': True, 'message': f'Stepped forward {seconds} seconds'}
+                    else:
+                        response = {'success': False, 'message': 'Cannot step forward (not paused or no frames available)'}
+                else:
+                    if self.camera_controller.step_seconds_backward(seconds):
+                        response = {'success': True, 'message': f'Stepped backward {seconds} seconds'}
+                    else:
+                        response = {'success': False, 'message': 'Cannot step backward (not paused or at beginning)'}
+
             elif path == '/api/seek_to_frame':
                 frame_number = data.get('frame', 0)
                 success, message = self.camera_controller.seek_to_frame(frame_number)

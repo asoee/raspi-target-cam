@@ -527,6 +527,24 @@
                             ⏭️ Step Forward
                         </button>
                     </div>
+
+                    <div class="control-row">
+                        <button onclick="stepBackwardSeconds(1)" id="stepBack1sBtn" disabled>
+                            ⏪ -1s
+                        </button>
+                        <button onclick="stepForwardSeconds(1)" id="stepForward1sBtn" disabled>
+                            ⏩ +1s
+                        </button>
+                    </div>
+
+                    <div class="control-row">
+                        <button onclick="stepBackwardSeconds(10)" id="stepBack10sBtn" disabled>
+                            ⏪⏪ -10s
+                        </button>
+                        <button onclick="stepForwardSeconds(10)" id="stepForward10sBtn" disabled>
+                            ⏩⏩ +10s
+                        </button>
+                    </div>
                 </div>
 
                 <div class="control-group">
@@ -1298,6 +1316,36 @@
                 .catch(error => updateStatus(`❌ Step backward error: ${error}`, true));
         }
 
+        function stepForwardSeconds(seconds) {
+            updateStatus(`⏩ Stepping forward ${seconds} seconds...`, false);
+
+            apiCall('/api/playback_step_seconds', {seconds: seconds, forward: true})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        updatePlaybackControls();
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Step forward ${seconds}s error: ${error}`, true));
+        }
+
+        function stepBackwardSeconds(seconds) {
+            updateStatus(`⏪ Stepping backward ${seconds} seconds...`, false);
+
+            apiCall('/api/playback_step_seconds', {seconds: seconds, forward: false})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        updatePlaybackControls();
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Step backward ${seconds}s error: ${error}`, true));
+        }
+
         function seekToFrame() {
             const slider = document.getElementById('frameSlider');
             const targetFrame = parseInt(slider.value);
@@ -1380,6 +1428,17 @@
                 resumeBtn.disabled = !status.paused;
                 stepBackBtn.disabled = !status.paused || !status.can_step_backward;
                 stepForwardBtn.disabled = !status.paused || !status.can_step_forward;
+
+                // Update time-based step buttons
+                const stepBack1sBtn = document.getElementById('stepBack1sBtn');
+                const stepForward1sBtn = document.getElementById('stepForward1sBtn');
+                const stepBack10sBtn = document.getElementById('stepBack10sBtn');
+                const stepForward10sBtn = document.getElementById('stepForward10sBtn');
+
+                stepBack1sBtn.disabled = !status.paused || !status.can_step_backward;
+                stepForward1sBtn.disabled = !status.paused || !status.can_step_forward;
+                stepBack10sBtn.disabled = !status.paused || !status.can_step_backward;
+                stepForward10sBtn.disabled = !status.paused || !status.can_step_forward;
             } else {
                 playbackControlsDiv.style.display = 'none';
             }

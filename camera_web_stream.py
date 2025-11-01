@@ -773,6 +773,38 @@ class CameraController:
             print(f"DEBUG: Step backward to frame {self.display_frame_number}")
         return success
 
+    def step_seconds_forward(self, seconds):
+        """Step forward by specified seconds when paused using threaded system"""
+        if self.source_type != "video" or not self.paused:
+            return False
+
+        if not self.capture_system:
+            return False
+
+        success = self.capture_system.step_seconds(seconds, forward=True)
+        if success:
+            # Update display frame number
+            pos = self.capture_system.get_playback_position()
+            self.display_frame_number = pos['current_frame']
+            print(f"DEBUG: Step forward {seconds}s to frame {self.display_frame_number}")
+        return success
+
+    def step_seconds_backward(self, seconds):
+        """Step backward by specified seconds when paused using threaded system"""
+        if self.source_type != "video" or not self.paused:
+            return False
+
+        if not self.capture_system:
+            return False
+
+        success = self.capture_system.step_seconds(seconds, forward=False)
+        if success:
+            # Update display frame number
+            pos = self.capture_system.get_playback_position()
+            self.display_frame_number = pos['current_frame']
+            print(f"DEBUG: Step backward {seconds}s to frame {self.display_frame_number}")
+        return success
+
     def seek_to_frame(self, target_frame):
         """Seek to a specific frame number using threaded system"""
         if self.source_type != "video":
