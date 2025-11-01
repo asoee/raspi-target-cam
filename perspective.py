@@ -17,6 +17,8 @@ class Perspective:
         self.calibration_file = calibration_file
         self.saved_perspective_matrix = None
         self.saved_ellipse_data = None
+        self.saved_checkerboard_data = None
+        self.calibration_method = None  # 'ellipse' or 'checkerboard'
         self.calibration_resolution = None
         self.debug_mode = False
         self.debug_frame = None
@@ -162,11 +164,13 @@ class Perspective:
 
         for contour in ring_contours:
             if len(contour) < 5:  # Need at least 5 points to fit ellipse
+                print("skip contour: too few points")
                 rejection_reasons.append(f"Contour {analyzed_contours+1}: <5 points ({len(contour)})")
                 continue
 
             area = cv2.contourArea(contour)
             if area < 1000:  # Skip small contours
+                print("skip contour: too small")
                 continue
 
             analyzed_contours += 1
@@ -180,7 +184,7 @@ class Perspective:
                 aspect_ratio = max(major_axis, minor_axis) / min(major_axis, minor_axis)
 
                 # Use same constraints as original detector
-                if aspect_ratio < 1.02:
+                if aspect_ratio < -0.8:
                     rejection_reasons.append(f"Contour {analyzed_contours}: too circular (ratio={aspect_ratio:.2f})")
                     continue
                 elif aspect_ratio > 1.2:
@@ -195,7 +199,7 @@ class Perspective:
                 center_score = 1.0 - (abs(center_x - w/2) + abs(center_y - h/2)) / (w + h)
 
                 score = size_score * 0.5 + aspect_score * 0.3 + center_score * 0.2
-
+                
                 # Add this ellipse to our collection
                 all_detected_ellipses.append((ellipse, score, contour))
 
@@ -256,68 +260,123 @@ class Perspective:
 
     def create_ellipse_to_circle_transform(self, ellipse, output_size):
         """
-        Create the correct ellipse-to-circle transformation (compress major axis with inverse rotation)
+        Create ellipse-to-circle transformation using 4-point perspective mapping
+        Maps ellipse-aligned bounding box to circle-aligned bounding box
         """
-        (center_x, center_y), (minor_axis, major_axis), angle = ellipse
+        (center_x, center_y), (axis1, axis2), angle = ellipse
         output_width, output_height = output_size
+
+        # Determine which is major/minor
+        minor_axis = min(axis1, axis2)
+        major_axis = max(axis1, axis2)
 
         print(f"Creating ellipse-to-circle transform:")
         print(f"  Ellipse center: ({center_x:.1f}, {center_y:.1f})")
-        print(f"  Ellipse axes: minor={minor_axis:.1f}, major={major_axis:.1f}")
+        print(f"  Ellipse axes: axis1={axis1:.1f}, axis2={axis2:.1f}")
+        print(f"  Determined: minor={minor_axis:.1f}, major={major_axis:.1f}")
         print(f"  Ellipse angle: {angle:.1f}°")
 
-        # Convert angle to radians
+        # Extend axes to get full ellipse dimensions (diameter * sqrt(2) for bounding box)
+        a1_extended = axis1 * np.sqrt(2)
+        a2_extended = axis2 * np.sqrt(2)
+
+        # Calculate major axis endpoints (perpendicular to angle)
+        # axis2 is along the perpendicular direction (90° - angle)
         angle_rad = np.radians(angle)
-        cos_a = np.cos(angle_rad)
-        sin_a = np.sin(angle_rad)
+        maj_dx = (a2_extended / 2) * np.cos(np.radians(90 - angle))
+        maj_dy = (a2_extended / 2) * np.sin(np.radians(90 - angle))
 
-        image_center_x = output_width / 2
-        image_center_y = output_height / 2
+        # Calculate minor axis endpoints (along the angle)
+        # axis1 is along the angle direction
+        min_dx = (a1_extended / 2) * np.cos(angle_rad)
+        min_dy = (a1_extended / 2) * np.sin(angle_rad)
 
-        # Translation matrices
-        T_to_origin = np.array([
-            [1, 0, -image_center_x],
-            [0, 1, -image_center_y],
-            [0, 0, 1]
-        ], dtype=np.float32)
+        # Four corner points of ellipse-aligned bounding box
+        p1 = np.array([center_x + maj_dx, center_y - maj_dy])
+        p2 = np.array([center_x - maj_dx, center_y + maj_dy])
+        p3 = np.array([center_x - min_dx, center_y - min_dy])
+        p4 = np.array([center_x + min_dx, center_y + min_dy])
 
-        T_from_origin = np.array([
-            [1, 0, image_center_x],
-            [0, 1, image_center_y],
-            [0, 0, 1]
-        ], dtype=np.float32)
+        # For a circle, minor axis points should be rotated 90° from their current position
+        # These are the target positions for p3 and p4
+        p3_circle = np.array([center_x - maj_dy, center_y - maj_dx])
+        p4_circle = np.array([center_x + maj_dy, center_y + maj_dx])
 
-        # Rotation matrices (inverse rotation)
-        R_align_inv = np.array([
-            [cos_a, -sin_a, 0],
-            [sin_a, cos_a, 0],
-            [0, 0, 1]
-        ], dtype=np.float32)
+        # Source points (ellipse)
+        pts_src = np.float32([p1, p2, p3, p4])
 
-        R_back_inv = np.array([
-            [cos_a, sin_a, 0],
-            [-sin_a, cos_a, 0],
-            [0, 0, 1]
-        ], dtype=np.float32)
+        # Target points (circle) - major axis stays same, minor axis becomes perpendicular
+        pts_dst = np.float32([p1, p2, p3_circle, p4_circle])
 
-        # Compression and scaling
+        # Calculate perspective transform from these 4 point pairs
+        transform = cv2.getPerspectiveTransform(pts_src, pts_dst)
+
         compression_factor = minor_axis / major_axis
-        scale_to_fill = 1.0 / compression_factor  # Scale up to fill frame
-
-        # Combined scaling matrix
-        S_combined = np.array([
-            [scale_to_fill * compression_factor, 0, 0],  # This equals 1.0
-            [0, scale_to_fill, 0],
-            [0, 0, 1]
-        ], dtype=np.float32)
-
-        # Final transformation
-        transform = T_from_origin @ R_back_inv @ S_combined @ R_align_inv @ T_to_origin
-
         print(f"  Compression factor: {compression_factor:.3f}")
-        print(f"  Scale to fill factor: {scale_to_fill:.3f}")
+        print(f"  Using 4-point perspective transform")
 
         return transform
+
+    def measure_circle_circularity(self, frame, center, radius):
+        """
+        Measure how circular a detected shape is after transformation
+
+        Args:
+            frame: Transformed frame to analyze
+            center: (x, y) center point
+            radius: Expected radius
+
+        Returns:
+            circularity_score: 0.0 to 1.0, where 1.0 is perfectly circular
+        """
+        h, w = frame.shape[:2]
+        cx, cy = int(center[0]), int(center[1])
+        r = int(radius)
+
+        # Ensure circle is within bounds
+        if cx - r < 0 or cy - r < 0 or cx + r >= w or cy + r >= h:
+            return 0.0
+
+        # Extract region around the circle
+        roi_size = r * 2 + 20  # Add margin
+        x1 = max(0, cx - roi_size // 2)
+        y1 = max(0, cy - roi_size // 2)
+        x2 = min(w, cx + roi_size // 2)
+        y2 = min(h, cy + roi_size // 2)
+
+        roi = frame[y1:y2, x1:x2]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+        # Detect edges
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 50, 150)
+
+        # Find contours
+        contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            return 0.0
+
+        # Find the largest contour (likely the outer ring)
+        largest_contour = max(contours, key=cv2.contourArea)
+
+        if len(largest_contour) < 5:
+            return 0.0
+
+        # Fit ellipse to the detected contour
+        try:
+            fitted_ellipse = cv2.fitEllipse(largest_contour)
+            (_, _), (minor_axis, major_axis), _ = fitted_ellipse
+
+            # Calculate how circular it is
+            aspect_ratio = max(major_axis, minor_axis) / max(min(major_axis, minor_axis), 1.0)
+
+            # Circularity: 1.0 = perfect circle, decreases as it becomes more elliptical
+            circularity = 1.0 / aspect_ratio
+
+            return circularity
+        except:
+            return 0.0
 
     def transform_ellipse_center(self, ellipse, transform_matrix):
         """
@@ -349,13 +408,13 @@ class Perspective:
         Calculate the radius of the circle that the ellipse becomes after transformation
 
         Args:
-            ellipse: OpenCV ellipse tuple ((center_x, center_y), (minor_axis, major_axis), angle)
+            ellipse: OpenCV ellipse tuple ((center_x, center_y), (axis1, axis2), angle)
             transform_matrix: 3x3 transformation matrix
 
         Returns:
             circle_radius: radius of the resulting circle in pixels
         """
-        (center_x, center_y), (minor_axis, major_axis), angle = ellipse
+        (center_x, center_y), (axis1, axis2), angle = ellipse
 
         # Convert angle to radians
         angle_rad = np.radians(angle)
@@ -363,48 +422,49 @@ class Perspective:
         sin_a = np.sin(angle_rad)
 
         # Calculate points on the ellipse axes from the center
-        # Major axis endpoints
-        major_half = major_axis / 2
-        major_end1 = np.array([center_x + major_half * cos_a, center_y + major_half * sin_a, 1.0])
-        major_end2 = np.array([center_x - major_half * cos_a, center_y - major_half * sin_a, 1.0])
+        # In OpenCV fitEllipse, the angle tells us the orientation of axis1
+        # axis1 endpoints (along the angle direction)
+        axis1_half = axis1 / 2
+        axis1_end1 = np.array([center_x + axis1_half * cos_a, center_y + axis1_half * sin_a, 1.0])
+        axis1_end2 = np.array([center_x - axis1_half * cos_a, center_y - axis1_half * sin_a, 1.0])
 
-        # Minor axis endpoints
-        minor_half = minor_axis / 2
-        minor_end1 = np.array([center_x - minor_half * sin_a, center_y + minor_half * cos_a, 1.0])
-        minor_end2 = np.array([center_x + minor_half * sin_a, center_y - minor_half * cos_a, 1.0])
+        # axis2 endpoints (perpendicular to axis1)
+        axis2_half = axis2 / 2
+        axis2_end1 = np.array([center_x - axis2_half * sin_a, center_y + axis2_half * cos_a, 1.0])
+        axis2_end2 = np.array([center_x + axis2_half * sin_a, center_y - axis2_half * cos_a, 1.0])
 
         # Transform the center and axis endpoints
         center_transformed = transform_matrix @ np.array([center_x, center_y, 1.0])
-        major_end1_transformed = transform_matrix @ major_end1
-        major_end2_transformed = transform_matrix @ major_end2
-        minor_end1_transformed = transform_matrix @ minor_end1
-        minor_end2_transformed = transform_matrix @ minor_end2
+        axis1_end1_transformed = transform_matrix @ axis1_end1
+        axis1_end2_transformed = transform_matrix @ axis1_end2
+        axis2_end1_transformed = transform_matrix @ axis2_end1
+        axis2_end2_transformed = transform_matrix @ axis2_end2
 
         # Convert from homogeneous coordinates
         def to_cartesian(point):
             return np.array([point[0] / point[2], point[1] / point[2]])
 
         center_cart = to_cartesian(center_transformed)
-        major_end1_cart = to_cartesian(major_end1_transformed)
-        major_end2_cart = to_cartesian(major_end2_transformed)
-        minor_end1_cart = to_cartesian(minor_end1_transformed)
-        minor_end2_cart = to_cartesian(minor_end2_transformed)
+        axis1_end1_cart = to_cartesian(axis1_end1_transformed)
+        axis1_end2_cart = to_cartesian(axis1_end2_transformed)
+        axis2_end1_cart = to_cartesian(axis2_end1_transformed)
+        axis2_end2_cart = to_cartesian(axis2_end2_transformed)
 
         # Calculate distances from center to each axis endpoint
-        major_radius1 = np.linalg.norm(major_end1_cart - center_cart)
-        major_radius2 = np.linalg.norm(major_end2_cart - center_cart)
-        minor_radius1 = np.linalg.norm(minor_end1_cart - center_cart)
-        minor_radius2 = np.linalg.norm(minor_end2_cart - center_cart)
+        axis1_radius1 = np.linalg.norm(axis1_end1_cart - center_cart)
+        axis1_radius2 = np.linalg.norm(axis1_end2_cart - center_cart)
+        axis2_radius1 = np.linalg.norm(axis2_end1_cart - center_cart)
+        axis2_radius2 = np.linalg.norm(axis2_end2_cart - center_cart)
 
         # Average the radii (should be very similar if transformation worked correctly)
-        avg_major_radius = (major_radius1 + major_radius2) / 2
-        avg_minor_radius = (minor_radius1 + minor_radius2) / 2
-        overall_avg_radius = (avg_major_radius + avg_minor_radius) / 2
+        avg_axis1_radius = (axis1_radius1 + axis1_radius2) / 2
+        avg_axis2_radius = (axis2_radius1 + axis2_radius2) / 2
+        overall_avg_radius = (avg_axis1_radius + avg_axis2_radius) / 2
 
         print(f"  Transformed axis radii:")
-        print(f"    Major axis: {avg_major_radius:.1f} pixels")
-        print(f"    Minor axis: {avg_minor_radius:.1f} pixels")
-        print(f"    Difference: {abs(avg_major_radius - avg_minor_radius):.1f} pixels")
+        print(f"    Axis 1: {avg_axis1_radius:.1f} pixels")
+        print(f"    Axis 2: {avg_axis2_radius:.1f} pixels")
+        print(f"    Difference: {abs(avg_axis1_radius - avg_axis2_radius):.1f} pixels")
 
         return overall_avg_radius
 
@@ -551,11 +611,13 @@ class Perspective:
         # Right side: Improved perspective correction preview
         try:
             if detected_ellipse is not None:
-                # Apply the improved transformation with visualization
-                transformed_image, _, circle_radius = self.apply_ellipse_to_circle_transform(
-                    original_frame, detected_ellipse, (w, h))
+                # Apply the provided transformation matrix (don't recalculate!)
+                transformed_image = cv2.warpPerspective(original_frame, transform_matrix, (w, h))
 
                 if transformed_image is not None:
+                    # Calculate circle radius for visualization
+                    circle_radius = self.calculate_transformed_circle_size(detected_ellipse, transform_matrix)
+
                     # Add transformation visualization markers
                     annotated_image = self.add_transformation_visualization(
                         transformed_image, detected_ellipse, transform_matrix, circle_radius, (w, h))
@@ -759,7 +821,7 @@ class Perspective:
 
         return debug_frame
 
-    def detect_ellipse_perspective_transform(self, frame, debug_mode=None):
+    def detect_ellipse_perspective_transform(self, frame, debug_mode=None, min_aspect_ratio=None):
         """
         Detect perspective transformation based on outer circle appearing as ellipse
         Uses the improved detection from perspective.py module
@@ -767,6 +829,8 @@ class Perspective:
         Args:
             frame: Input frame to analyze
             debug_mode: Whether to create debug visualizations
+            min_aspect_ratio: Minimum aspect ratio threshold - only accept ellipses with
+                            aspect ratio better (closer to 1.0) than this value
 
         Returns:
             tuple: (perspective_matrix, detected_ellipse, debug_frame) where:
@@ -790,6 +854,31 @@ class Perspective:
             min_area=1000,
             min_circularity=0.3
         )
+
+        # Filter ellipses by aspect ratio if threshold provided
+        if min_aspect_ratio is not None and len(all_ellipses) > 0:
+            filtered_ellipses = []
+            for ellipse, score, contour in all_ellipses:
+                (center_x, center_y), (minor_axis, major_axis), angle = ellipse
+                aspect_ratio = max(major_axis, minor_axis) / min(major_axis, minor_axis)
+
+                # Only accept ellipses with better (lower) aspect ratio than threshold
+                if aspect_ratio < min_aspect_ratio:
+                    filtered_ellipses.append((ellipse, score, contour))
+                    print(f"  ✓ Accepted ellipse: aspect_ratio={aspect_ratio:.3f} < {min_aspect_ratio:.3f}")
+                else:
+                    print(f"  ✗ Filtered ellipse: aspect_ratio={aspect_ratio:.3f} >= {min_aspect_ratio:.3f}")
+
+            # If we filtered out all ellipses, use None
+            if len(filtered_ellipses) == 0:
+                print(f"  ⚠ All {len(all_ellipses)} ellipses filtered out (worse than threshold {min_aspect_ratio:.3f})")
+                best_ellipse = None
+                best_contour = None
+            else:
+                # Re-select best from filtered ellipses
+                all_ellipses = filtered_ellipses
+                best_ellipse, best_score, best_contour = max(filtered_ellipses, key=lambda x: x[1])
+                print(f"  → Selected best from {len(filtered_ellipses)} filtered ellipses (score={best_score:.3f})")
 
         # Create debug visualization if requested
         if debug_mode:
@@ -865,15 +954,23 @@ class Perspective:
                 'timestamp': time.time(),
                 'perspective_matrix': self.saved_perspective_matrix.tolist(),
                 'camera_resolution': list(camera_resolution) if camera_resolution else None,
+                'calibration_method': self.calibration_method,
                 'notes': 'Perspective calibration for fixed camera installation'
             }
+
+            # Add method-specific data
+            if self.calibration_method == 'ellipse' and self.saved_ellipse_data:
+                calibration_data['ellipse_data'] = self.saved_ellipse_data
+            elif self.calibration_method == 'checkerboard' and self.saved_checkerboard_data:
+                calibration_data['checkerboard_data'] = self.saved_checkerboard_data
 
             # Save to YAML file
             with open(self.calibration_file, 'w') as f:
                 yaml.dump(calibration_data, f, default_flow_style=False)
 
-            print(f"Perspective calibration saved to {self.calibration_file}")
-            return True, f"Calibration saved successfully"
+            method_name = self.calibration_method or 'unknown'
+            print(f"Perspective calibration ({method_name}) saved to {self.calibration_file}")
+            return True, f"Calibration saved successfully ({method_name})"
 
         except Exception as e:
             error_msg = f"Failed to save calibration: {str(e)}"
@@ -895,36 +992,562 @@ class Perspective:
                 self.saved_perspective_matrix = np.array(calibration_data['perspective_matrix'], dtype=np.float32)
                 self.calibration_resolution = calibration_data.get('camera_resolution', None)
 
-            # Load ellipse data
+            # Load calibration method
+            self.calibration_method = calibration_data.get('calibration_method', 'unknown')
+
+            # Load method-specific data
             if 'ellipse_data' in calibration_data:
                 self.saved_ellipse_data = calibration_data['ellipse_data']
+            if 'checkerboard_data' in calibration_data:
+                self.saved_checkerboard_data = calibration_data['checkerboard_data']
 
             timestamp = calibration_data.get('timestamp', 0)
             age_hours = (time.time() - timestamp) / 3600
 
-            print(f"Perspective calibration loaded from {self.calibration_file} (age: {age_hours:.1f} hours)")
-            return True, f"Calibration loaded successfully (age: {age_hours:.1f}h)"
+            method_name = self.calibration_method or 'unknown'
+            print(f"Perspective calibration ({method_name}) loaded from {self.calibration_file} (age: {age_hours:.1f} hours)")
+            return True, f"Calibration loaded successfully ({method_name}, age: {age_hours:.1f}h)"
 
         except Exception as e:
             error_msg = f"Failed to load calibration: {str(e)}"
             print(error_msg)
             return False, error_msg
 
-    def calibrate_perspective(self, frame):
-        """Perform on-demand perspective calibration"""
-        # Store the ellipse data when calibration succeeds
-        # Always enable debug mode during calibration to generate visualization
-        ellipse_matrix, detected_ellipse, debug_frame = self.detect_ellipse_perspective_transform(frame, debug_mode=True)
-        if ellipse_matrix is not None:
-            self.saved_perspective_matrix = ellipse_matrix
-            # Store ellipse data from the debug info if available
-            self.saved_ellipse_data = {
-                'detection_method': 'ellipse',
+    def detect_checkerboard_corners(self, frame, pattern_size=(9, 6)):
+        """
+        Detect checkerboard pattern corners for calibration
+
+        Args:
+            frame: Input image containing checkerboard pattern
+            pattern_size: Tuple of (columns, rows) of internal corners (e.g., 9x6 for 10x7 squares)
+
+        Returns:
+            corners: Detected corner points, or None if detection failed
+            debug_frame: Debug visualization frame
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = frame.shape[:2]
+
+        # Find checkerboard corners
+        # cv2.CALIB_CB_ADAPTIVE_THRESH - Use adaptive thresholding
+        # cv2.CALIB_CB_NORMALIZE_IMAGE - Normalize image gamma
+        # cv2.CALIB_CB_FAST_CHECK - Fast check to reject non-checkerboard patterns
+        ret, corners = cv2.findChessboardCorners(
+            gray,
+            pattern_size,
+            cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE + cv2.CALIB_CB_FAST_CHECK
+        )
+
+        debug_frame = frame.copy()
+
+        if ret:
+            # Refine corner locations to sub-pixel accuracy
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+            corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
+
+            # Draw detected corners for visualization
+            cv2.drawChessboardCorners(debug_frame, pattern_size, corners, ret)
+
+            # Add success message
+            cv2.putText(debug_frame, f"CHECKERBOARD DETECTED ({pattern_size[0]}x{pattern_size[1]})",
+                       (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+            cv2.putText(debug_frame, f"Corners found: {len(corners)}",
+                       (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+
+            print(f"Checkerboard detected: {pattern_size[0]}x{pattern_size[1]} with {len(corners)} corners")
+        else:
+            # Add failure message
+            cv2.putText(debug_frame, f"CHECKERBOARD NOT FOUND ({pattern_size[0]}x{pattern_size[1]})",
+                       (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+            cv2.putText(debug_frame, "Ensure pattern is visible and well-lit",
+                       (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            print(f"Checkerboard not detected with pattern size {pattern_size}")
+
+        return corners if ret else None, debug_frame
+
+    def create_checkerboard_perspective_transform(self, frame, corners, pattern_size=(9, 6)):
+        """
+        Create perspective transformation matrix from checkerboard corners
+
+        Args:
+            frame: Input image
+            corners: Detected checkerboard corners
+            pattern_size: Tuple of (columns, rows) of internal corners
+
+        Returns:
+            transform_matrix: 3x3 perspective transformation matrix
+            corrected_frame: Perspective-corrected image
+        """
+        h, w = frame.shape[:2]
+
+        # Extract the four outermost corners of the checkerboard
+        # Corners are returned in row-major order (left to right, top to bottom)
+        top_left = corners[0][0]
+        top_right = corners[pattern_size[0] - 1][0]
+        bottom_right = corners[-1][0]
+        bottom_left = corners[-pattern_size[0]][0]
+
+        # Source points (detected corners)
+        src_points = np.float32([top_left, top_right, bottom_right, bottom_left])
+
+        # Calculate the size of the checkerboard in the output image
+        # Use the average of horizontal and vertical dimensions to maintain aspect ratio
+        width_top = np.linalg.norm(top_right - top_left)
+        width_bottom = np.linalg.norm(bottom_right - bottom_left)
+        max_width = int(max(width_top, width_bottom))
+
+        height_left = np.linalg.norm(bottom_left - top_left)
+        height_right = np.linalg.norm(bottom_right - top_right)
+        max_height = int(max(height_left, height_right))
+
+        # Center the corrected pattern in the frame
+        # Calculate margins to center the pattern
+        margin_x = (w - max_width) // 2
+        margin_y = (h - max_height) // 2
+
+        # Destination points (centered rectangle in output frame)
+        dst_points = np.float32([
+            [margin_x, margin_y],                           # top-left
+            [margin_x + max_width, margin_y],              # top-right
+            [margin_x + max_width, margin_y + max_height], # bottom-right
+            [margin_x, margin_y + max_height]              # bottom-left
+        ])
+
+        # Calculate perspective transformation matrix
+        transform_matrix = cv2.getPerspectiveTransform(src_points, dst_points)
+
+        # Apply transformation
+        corrected_frame = cv2.warpPerspective(frame, transform_matrix, (w, h))
+
+        print(f"Checkerboard transform created:")
+        print(f"  Pattern dimensions: {max_width}x{max_height}")
+        print(f"  Centered at: ({margin_x}, {margin_y})")
+
+        return transform_matrix, corrected_frame
+
+    def calibrate_perspective_checkerboard(self, frame, pattern_size=(9, 6)):
+        """
+        Calibrate perspective using checkerboard pattern
+
+        Args:
+            frame: Input frame containing checkerboard pattern
+            pattern_size: Tuple of (columns, rows) of internal corners
+
+        Returns:
+            success: True if calibration succeeded
+            message: Status message
+        """
+        # Detect checkerboard corners
+        corners, debug_frame = self.detect_checkerboard_corners(frame, pattern_size)
+
+        # Store debug frame
+        if self.debug_mode:
+            self.debug_frame = debug_frame
+
+        if corners is None:
+            return False, f"Checkerboard pattern {pattern_size[0]}x{pattern_size[1]} not detected"
+
+        # Create perspective transformation
+        try:
+            transform_matrix, corrected_frame = self.create_checkerboard_perspective_transform(
+                frame, corners, pattern_size
+            )
+
+            # Store the calibration
+            self.saved_perspective_matrix = transform_matrix
+            self.calibration_method = 'checkerboard'
+            self.saved_checkerboard_data = {
+                'pattern_size': list(pattern_size),  # Convert tuple to list for YAML compatibility
                 'calibration_timestamp': time.time(),
             }
-            return True, "Perspective calibration successful"
+
+            # Update debug frame with corrected view
+            if self.debug_mode:
+                # Create side-by-side visualization
+                h, w = frame.shape[:2]
+                combined = np.zeros((h, w * 2, 3), dtype=np.uint8)
+                combined[:, :w] = debug_frame
+                combined[:, w:] = corrected_frame
+
+                # Add labels
+                cv2.putText(combined, "DETECTION", (10, h - 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.putText(combined, "CORRECTED", (w + 10, h - 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.line(combined, (w, 0), (w, h), (255, 255, 255), 2)
+
+                self.debug_frame = combined
+
+            return True, f"Checkerboard calibration successful ({pattern_size[0]}x{pattern_size[1]})"
+
+        except Exception as e:
+            print(f"Error creating checkerboard transform: {e}")
+            return False, f"Failed to create perspective transform: {str(e)}"
+
+    def calibrate_perspective_ellipse_iterative(self, frame, max_iterations=3, min_circularity=0.95):
+        """
+        Iteratively refine ellipse-based perspective calibration
+
+        Args:
+            frame: Input frame for calibration
+            max_iterations: Maximum number of refinement iterations
+            min_circularity: Target circularity (1.0 = perfect circle)
+
+        Returns:
+            success: True if calibration succeeded
+            message: Status message with iteration details
+        """
+        print(f"\n=== ITERATIVE ELLIPSE CALIBRATION ===")
+        print(f"Target circularity: {min_circularity:.3f}, Max iterations: {max_iterations}")
+
+        h, w = frame.shape[:2]
+        current_frame = frame.copy()
+        cumulative_matrix = None
+        best_matrix = None
+        best_circularity = 0.0
+        best_aspect_ratio = None  # Track best aspect ratio for filtering
+        iteration_results = []
+        iteration_debug_frames = []  # Store debug frames from all iterations
+
+        for iteration in range(max_iterations):
+            print(f"\n--- Iteration {iteration + 1}/{max_iterations} ---")
+
+            # Detect ellipse in current frame - always enable debug mode
+            # For iterations after the first, only accept ellipses better than previous best
+            min_aspect_threshold = best_aspect_ratio if iteration > 0 else None
+            ellipse_matrix, detected_ellipse, debug_frame = self.detect_ellipse_perspective_transform(
+                current_frame, debug_mode=True, min_aspect_ratio=min_aspect_threshold
+            )
+
+            # Save debug frame from each iteration
+            if debug_frame is not None:
+                iteration_debug_frames.append({
+                    'iteration': iteration + 1,
+                    'debug_frame': debug_frame,
+                    'input_frame': current_frame.copy()
+                })
+
+            if ellipse_matrix is None:
+                print(f"  No ellipse detected")
+                if iteration == 0:
+                    # First iteration failed
+                    return False, "No ellipse detected in initial frame"
+                else:
+                    # Use best result from previous iterations
+                    print(f"  Using best result from iteration {best_iteration + 1}")
+                    break
+
+            # Combine with cumulative transformation
+            if cumulative_matrix is None:
+                cumulative_matrix = ellipse_matrix
+            else:
+                cumulative_matrix = ellipse_matrix @ cumulative_matrix
+
+            # Apply cumulative transformation to ORIGINAL frame (not current_frame)
+            # This ensures we're always working from the original, not compounding transformations
+            transformed = cv2.warpPerspective(frame, cumulative_matrix, (w, h))
+
+            # Measure circularity by detecting ellipse in the TRANSFORMED result
+            # This shows how circular the result actually is
+            if detected_ellipse is not None:
+                # The aspect ratio of the detected ellipse directly indicates circularity
+                # If ellipse was detected in current_frame, it represents the remaining distortion
+                minor_axis = min(detected_ellipse[1])
+                major_axis = max(detected_ellipse[1])
+                aspect_ratio = major_axis / max(minor_axis, 1.0)
+
+                # Circularity based on detected ellipse aspect ratio
+                # 1.0 = perfect circle, lower = more elliptical
+                ellipse_circularity = 1.0 / aspect_ratio
+
+                # Also measure circularity in the final transformed result
+                # This validates that the transformation actually made it circular
+                result_circularity = 0.0
+                try:
+                    # Detect ellipse in transformed frame to measure actual result
+                    test_ellipse, _, _, _, _ = self.experimental_ellipse_detection(
+                        transformed,
+                        contour_mode=cv2.RETR_LIST,
+                        canny_low=50, canny_high=150,
+                        min_area=1000,
+                        min_circularity=0.3
+                    )
+                    if test_ellipse is not None:
+                        test_minor = min(test_ellipse[1])
+                        test_major = max(test_ellipse[1])
+                        test_aspect = test_major / max(test_minor, 1.0)
+                        result_circularity = 1.0 / test_aspect
+                        print(f"  Result ellipse aspect ratio: {test_aspect:.3f}")
+                except:
+                    result_circularity = ellipse_circularity
+
+                # Use the result circularity as the true measure
+                # This is what we actually achieved in the transformed frame
+                circularity = result_circularity if result_circularity > 0 else ellipse_circularity
+
+                iteration_results.append({
+                    'iteration': iteration + 1,
+                    'circularity': circularity,
+                    'ellipse_circularity': ellipse_circularity,
+                    'result_circularity': result_circularity,
+                    'matrix': cumulative_matrix.copy()
+                })
+
+                print(f"  Input ellipse aspect ratio: {aspect_ratio:.3f} (circularity: {ellipse_circularity:.4f})")
+                print(f"  Result circularity: {circularity:.4f}")
+
+                # Track best result and best aspect ratio
+                improved = False
+                if circularity > best_circularity:
+                    best_circularity = circularity
+                    best_matrix = cumulative_matrix.copy()
+                    best_iteration = iteration
+                    best_aspect_ratio = aspect_ratio  # Update threshold for next iteration
+                    improved = True
+                    print(f"  ✓ Improvement: {circularity:.4f} > {best_circularity if iteration == 0 else iteration_results[-2]['circularity']:.4f}")
+                    print(f"  → Next iteration will only accept ellipses with aspect_ratio < {best_aspect_ratio:.3f}")
+
+                # Check if we've reached target circularity
+                if circularity >= min_circularity:
+                    print(f"  ✓ Target circularity reached!")
+                    break
+
+                # Check if we're making progress
+                # If circularity isn't improving or getting worse, stop before next iteration
+                if iteration > 0:
+                    prev_circularity = iteration_results[-2]['circularity']
+                    if circularity <= prev_circularity + 0.001:
+                        # Not improving or getting worse
+                        if circularity < prev_circularity:
+                            print(f"  ⚠ Circularity got worse: {circularity:.4f} < {prev_circularity:.4f}")
+                            print(f"  → Using best result from iteration {best_iteration + 1}")
+                        else:
+                            print(f"  ⚠ Circularity not improving enough, stopping iterations")
+                        break
+
+                # Prepare for next iteration - use transformed frame as new input
+                current_frame = transformed
+            else:
+                print(f"  Warning: Could not measure circularity")
+                break
+
+        # Use best result
+        if best_matrix is not None:
+            self.saved_perspective_matrix = best_matrix
+            self.calibration_method = 'ellipse_iterative'
+            self.saved_ellipse_data = {
+                'calibration_timestamp': time.time(),
+                'iterations': len(iteration_results),
+                'final_circularity': best_circularity,
+                'iteration_results': [
+                    {'iteration': r['iteration'], 'circularity': r['circularity']}
+                    for r in iteration_results
+                ]
+            }
+
+            # Create enhanced debug frame showing all iterations
+            if len(iteration_results) > 0:
+                self._create_iterative_debug_frame(frame, iteration_results, best_matrix, iteration_debug_frames)
+
+            # Build message showing which iteration was best
+            if best_iteration < len(iteration_results) - 1:
+                # Best result was NOT the last iteration
+                message = (f"Iterative ellipse calibration successful: "
+                          f"{len(iteration_results)} iterations, "
+                          f"best from iteration {best_iteration + 1}, "
+                          f"circularity {best_circularity:.4f}")
+            else:
+                # Best result was the last iteration
+                message = (f"Iterative ellipse calibration successful: "
+                          f"{len(iteration_results)} iterations, "
+                          f"circularity {best_circularity:.4f}")
+
+            print(f"\n✓ {message}")
+            print(f"✓ Using transformation from iteration {best_iteration + 1}")
+            return True, message
         else:
-            return False, "No suitable ellipse found for calibration"
+            return False, "Iterative calibration failed to improve circularity"
+
+    def _create_iterative_debug_frame(self, original_frame, iteration_results, final_matrix, iteration_debug_frames=None):
+        """Create debug visualization showing all iteration progress
+
+        Args:
+            original_frame: Original input frame
+            iteration_results: List of iteration results with circularity scores
+            final_matrix: Final transformation matrix
+            iteration_debug_frames: List of debug frames from each iteration
+        """
+        h, w = original_frame.shape[:2]
+
+        if iteration_debug_frames and len(iteration_debug_frames) > 0:
+            num_iterations = len(iteration_debug_frames)
+
+            # Vertical stacking - one iteration per row
+            # Debug frames are typically 2x width (side-by-side: detection + corrected)
+            total_rows = num_iterations + 1  # +1 for final result
+
+            # Get dimensions from first debug frame to determine aspect ratio
+            first_debug = iteration_debug_frames[0]['debug_frame']
+            debug_h, debug_w = first_debug.shape[:2]
+
+            # Use the actual debug frame dimensions
+            row_height = debug_h
+            row_width = debug_w
+
+            combined_width = row_width
+            combined_height = row_height * total_rows
+            combined = np.zeros((combined_height, combined_width, 3), dtype=np.uint8)
+
+            # Add each iteration's debug frame as a separate row
+            for idx, iter_data in enumerate(iteration_debug_frames):
+                y_offset = row_height * idx
+                debug_frame = iter_data['debug_frame']
+
+                # Resize if needed to match the row dimensions (keeping aspect ratio)
+                if debug_frame.shape[:2] != (row_height, row_width):
+                    debug_frame = cv2.resize(debug_frame, (row_width, row_height))
+
+                combined[y_offset:y_offset + row_height, :] = debug_frame
+
+                # Add iteration label
+                iter_num = iter_data['iteration']
+                result = iteration_results[idx] if idx < len(iteration_results) else None
+                if result:
+                    circ = result.get('circularity', 0)
+                    color = (0, 255, 0) if circ >= 0.95 else (0, 255, 255)
+                    label = f"ITERATION {iter_num}: {circ:.4f}"
+                else:
+                    color = (255, 255, 255)
+                    label = f"ITERATION {iter_num}"
+
+                # Scale font based on image size
+                font_scale = max(0.7, min(1.5, row_width / 2000))
+                cv2.putText(combined, label, (10, y_offset + int(40 * font_scale)),
+                           cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 2)
+
+            # Add final result as last row
+            # Create a side-by-side view for consistency (original | final)
+            y_offset = row_height * num_iterations
+
+            # Create final row with original on left, final result on right
+            final_row = np.zeros((row_height, row_width, 3), dtype=np.uint8)
+
+            # Calculate dimensions for side-by-side layout
+            half_width = row_width // 2
+
+            # Resize original and final to fit side-by-side
+            original_resized = cv2.resize(original_frame, (half_width, row_height))
+            final_result = cv2.warpPerspective(original_frame, final_matrix, (w, h))
+            final_resized = cv2.resize(final_result, (half_width, row_height))
+
+            final_row[:, :half_width] = original_resized
+            final_row[:, half_width:] = final_resized
+
+            combined[y_offset:y_offset + row_height, :] = final_row
+
+            # Label final result
+            final_circ = iteration_results[-1].get('circularity', 0) if iteration_results else 0
+            color = (0, 255, 0) if final_circ >= 0.95 else (0, 255, 255)
+            font_scale = max(0.7, min(1.5, row_width / 2000))
+
+            # Add labels on both sides
+            cv2.putText(combined, "ORIGINAL", (10, y_offset + int(40 * font_scale)),
+                       cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 255), 2)
+            cv2.putText(combined, f"FINAL: {final_circ:.4f}", (half_width + 10, y_offset + int(40 * font_scale)),
+                       cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 2)
+
+            # Add center dividing line for final row
+            cv2.line(combined, (half_width, y_offset), (half_width, y_offset + row_height), (255, 255, 255), 2)
+
+            # Add dividing lines between rows
+            for idx in range(1, total_rows):
+                y_pos = row_height * idx
+                cv2.line(combined, (0, y_pos), (combined_width, y_pos), (255, 255, 255), 2)
+
+            self.debug_frame = combined
+        else:
+            # Fallback: simple side-by-side comparison
+            combined = np.zeros((h, w * 2, 3), dtype=np.uint8)
+            combined[:, :w] = original_frame
+            combined[:, w:] = cv2.warpPerspective(original_frame, final_matrix, (w, h))
+
+            # Add labels and iteration info
+            cv2.putText(combined, "ORIGINAL", (10, 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+            cv2.putText(combined, "CORRECTED (ITERATIVE)", (w + 10, 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+
+            # Show iteration progress
+            y_offset = 80
+            for result in iteration_results:
+                iteration_num = result['iteration']
+                circularity = result['circularity']
+                color = (0, 255, 0) if circularity >= 0.95 else (0, 255, 255)
+
+                cv2.putText(combined, f"Iter {iteration_num}: {circularity:.4f}",
+                           (w + 10, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                y_offset += 30
+
+            # Add dividing line
+            cv2.line(combined, (w, 0), (w, h), (255, 255, 255), 2)
+
+            self.debug_frame = combined
+
+    def calibrate_perspective(self, frame, method='auto', pattern_size=(9, 6), iterative=True, target_circularity=0.95, max_iterations=3):
+        """Perform on-demand perspective calibration
+
+        Args:
+            frame: Input frame for calibration
+            method: Calibration method - 'auto', 'ellipse', or 'checkerboard'
+            pattern_size: For checkerboard method, tuple of (columns, rows) of internal corners
+            iterative: Use iterative refinement for ellipse method
+            target_circularity: Target circularity for iterative refinement (0.0-1.0)
+            max_iterations: Maximum number of iterations for refinement
+
+        Returns:
+            success: True if calibration succeeded
+            message: Status message
+        """
+        # Store the ellipse/checkerboard data when calibration succeeds
+        # Always enable debug mode during calibration to generate visualization
+
+        if method == 'checkerboard':
+            return self.calibrate_perspective_checkerboard(frame, pattern_size)
+        elif method == 'ellipse':
+            if iterative:
+                return self.calibrate_perspective_ellipse_iterative(frame, max_iterations, target_circularity)
+            else:
+                # Original single-pass ellipse calibration
+                ellipse_matrix, detected_ellipse, debug_frame = self.detect_ellipse_perspective_transform(frame, debug_mode=True)
+                if ellipse_matrix is not None:
+                    self.saved_perspective_matrix = ellipse_matrix
+                    self.calibration_method = 'ellipse'
+                    self.saved_ellipse_data = {
+                        'calibration_timestamp': time.time(),
+                    }
+                    return True, "Ellipse calibration successful"
+                else:
+                    return False, "No suitable ellipse found for calibration"
+        else:  # method == 'auto'
+            # Try iterative ellipse first
+            if iterative:
+                success, message = self.calibrate_perspective_ellipse_iterative(frame, max_iterations, target_circularity)
+                if success:
+                    return True, f"{message} (auto)"
+
+            # Fallback to single-pass ellipse
+            ellipse_matrix, detected_ellipse, debug_frame = self.detect_ellipse_perspective_transform(frame, debug_mode=True)
+            if ellipse_matrix is not None:
+                self.saved_perspective_matrix = ellipse_matrix
+                self.calibration_method = 'ellipse'
+                self.saved_ellipse_data = {
+                    'calibration_timestamp': time.time(),
+                }
+                return True, "Ellipse calibration successful (auto, single-pass)"
+
+            # Final fallback to checkerboard
+            return self.calibrate_perspective_checkerboard(frame, pattern_size)
 
     def get_scaled_perspective_matrix(self, current_resolution):
         """Get perspective matrix scaled for current resolution"""

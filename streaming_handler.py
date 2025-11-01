@@ -110,6 +110,7 @@ class StreamingHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
             frame_count = 0
+            no_frame_count = 0  # Track consecutive frames with no data
             while True:
                 try:
                     frame_data = self.camera_controller.get_frame_jpeg()
@@ -122,11 +123,21 @@ class StreamingHandler(BaseHTTPRequestHandler):
                         self.wfile.write(b'\r\n')
 
                         frame_count += 1
+                        no_frame_count = 0  # Reset counter on successful frame
                         if frame_count % 100 == 0:  # Log every 100 frames
                             print(f"DEBUG: Served {frame_count} stream frames")
+                    else:
+                        # No frame available (possibly during source switching)
+                        no_frame_count += 1
+                        if no_frame_count > 100:  # If no frames for ~3 seconds
+                            print("DEBUG: Stream timed out waiting for frames, reconnecting...")
+                            break  # Break to allow client to reconnect
+
                     time.sleep(0.03)
                 except Exception as e:
                     print(f"ERROR in stream frame delivery: {e}")
+                    import traceback
+                    traceback.print_exc()
                     break  # Exit the streaming loop on error
         except Exception as e:
             print(f"ERROR in _serve_mjpeg_stream: {e}")
@@ -189,8 +200,9 @@ class StreamingHandler(BaseHTTPRequestHandler):
     def _serve_perspective_debug_stream(self):
         """Serve MJPEG stream with perspective detection visualization
 
-        Shows the cached debug frame from the last calibration attempt.
-        Detection is triggered manually via the calibrate_perspective API.
+        Shows either:
+        1. The cached debug frame from the last calibration, OR
+        2. Live preview with current frame and instructions
         """
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
@@ -215,11 +227,43 @@ class StreamingHandler(BaseHTTPRequestHandler):
                     self.wfile.write(frame_data)
                     self.wfile.write(b'\r\n')
                 else:
-                    # No debug frame available - show instructions
-                    self._send_placeholder_frame(
-                        "Perspective Detection",
-                        "Click 'Auto-Calibrate' to detect ellipse"
-                    )
+                    # No debug frame available - show live preview with instructions
+                    with self.camera_controller.lock:
+                        current_frame = self.camera_controller.raw_frame.copy() if self.camera_controller.raw_frame is not None else None
+
+                    if current_frame is not None:
+                        # Create preview with instructions overlay
+                        preview = current_frame.copy()
+                        h, w = preview.shape[:2]
+
+                        # Add semi-transparent overlay
+                        overlay = preview.copy()
+                        cv2.rectangle(overlay, (10, 10), (w - 10, 150), (0, 0, 0), -1)
+                        cv2.addWeighted(overlay, 0.6, preview, 0.4, 0, preview)
+
+                        # Add text
+                        cv2.putText(preview, "PERSPECTIVE CALIBRATION", (20, 50),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+                        cv2.putText(preview, "Click 'Calibrate' to detect ellipse or checkerboard", (20, 90),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                        cv2.putText(preview, "Results will appear here", (20, 125),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
+
+                        _, buffer = cv2.imencode('.jpg', preview, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        frame_data = buffer.tobytes()
+
+                        self.wfile.write(b'--frame\r\n')
+                        self.send_header('Content-Type', 'image/jpeg')
+                        self.send_header('Content-Length', str(len(frame_data)))
+                        self.end_headers()
+                        self.wfile.write(frame_data)
+                        self.wfile.write(b'\r\n')
+                    else:
+                        # No frame available - show placeholder
+                        self._send_placeholder_frame(
+                            "Perspective Detection",
+                            "Waiting for camera frame..."
+                        )
 
                 time.sleep(0.1)  # 10 FPS for stream updates
         except Exception as e:
@@ -228,8 +272,7 @@ class StreamingHandler(BaseHTTPRequestHandler):
     def _serve_corrected_stream(self):
         """Serve MJPEG stream with perspective-corrected frames
 
-        This stream always shows corrected frames when perspective correction is enabled,
-        independent of debug mode. Falls back to original frame if correction is disabled.
+        This stream always shows corrected frames, even when perspective correction is disabled.
         """
         self.send_response(200)
         self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
@@ -245,20 +288,14 @@ class StreamingHandler(BaseHTTPRequestHandler):
 
                 if frame is not None:
                     # Try to apply perspective correction
-                    if self.camera_controller.perspective_correction_enabled:
-                        corrected_frame = self.camera_controller.perspective.apply_perspective_correction(frame)
-                        if corrected_frame is not None:
-                            frame = corrected_frame
-                        else:
-                            # Add text overlay indicating correction failed
-                            frame = frame.copy()
-                            cv2.putText(frame, "Perspective correction not calibrated", (10, 30),
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    corrected_frame = self.camera_controller.perspective.apply_perspective_correction(frame)
+                    if corrected_frame is not None:
+                        frame = corrected_frame
                     else:
-                        # Add text overlay indicating correction is disabled
+                        # Add text overlay indicating correction failed
                         frame = frame.copy()
-                        cv2.putText(frame, "Perspective correction disabled", (10, 30),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 128, 0), 2)
+                        cv2.putText(frame, "Perspective correction not calibrated", (10, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
                     # Encode as JPEG
                     _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -411,8 +448,36 @@ class StreamingHandler(BaseHTTPRequestHandler):
                     response = {'success': False, 'message': 'Failed to force target re-detection'}
 
             elif path == '/api/calibrate_perspective':
-                success, message = self.camera_controller.calibrate_perspective()
-                response = {'success': success, 'message': message}
+                # Get calibration method from data (default to 'auto')
+                method = data.get('method', 'auto')
+                pattern_size = data.get('pattern_size', [9, 6])  # Default 9x6 checkerboard
+                iterative = data.get('iterative', True)  # Default to iterative refinement for ellipse
+
+                # Get quality settings for iterative calibration
+                target_circularity = data.get('target_circularity', 0.95)  # Default 95% circularity
+                max_iterations = data.get('max_iterations', 3)  # Default 3 iterations
+
+                # Convert pattern_size to tuple
+                if isinstance(pattern_size, list) and len(pattern_size) == 2:
+                    pattern_size = tuple(pattern_size)
+                else:
+                    pattern_size = (9, 6)
+
+                success, message = self.camera_controller.calibrate_perspective(
+                    method=method,
+                    pattern_size=pattern_size,
+                    iterative=iterative,
+                    target_circularity=target_circularity,
+                    max_iterations=max_iterations
+                )
+                response = {
+                    'success': success,
+                    'message': message,
+                    'method': method,
+                    'iterative': iterative,
+                    'target_circularity': target_circularity,
+                    'max_iterations': max_iterations
+                }
 
             elif path == '/api/save_calibration':
                 # Get current camera resolution and save calibration

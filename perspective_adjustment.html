@@ -338,11 +338,73 @@
             </div>
 
             <div class="control-section">
+                <h3>🎯 Calibration Method</h3>
+
+                <div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px;">
+                    <label style="font-weight: 600; color: #2c3e50;">Method:</label>
+                    <select id="calibrationMethod" style="padding: 10px; border-radius: 6px; border: 2px solid #e0e0e0; font-size: 1em;">
+                        <option value="auto">Auto (Try Ellipse, fallback to Checkerboard)</option>
+                        <option value="ellipse" selected>Ellipse Detection</option>
+                        <option value="checkerboard">Checkerboard Pattern</option>
+                    </select>
+                </div>
+
+                <div class="toggle-container" id="iterativeToggleContainer">
+                    <label for="iterativeToggle">Iterative Refinement</label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="iterativeToggle" checked onchange="toggleIterativeSettings()">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
+
+                <div id="iterativeSettings" style="margin-top: 10px; padding: 15px; background-color: #f0f8ff; border-radius: 8px; border: 2px solid #667eea;">
+                    <div style="margin-bottom: 15px;">
+                        <label style="font-weight: 600; color: #2c3e50; display: block; margin-bottom: 8px;">
+                            Target Circularity: <span id="circularityValue">0.95</span>
+                        </label>
+                        <input type="range" id="targetCircularity" min="0.85" max="0.99" step="0.01" value="0.95"
+                               style="width: 100%;" oninput="updateCircularityValue()">
+                        <div style="display: flex; justify-content: space-between; font-size: 0.8em; color: #666; margin-top: 5px;">
+                            <span>0.85 (Fast)</span>
+                            <span>0.95 (Default)</span>
+                            <span>0.99 (Perfect)</span>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label style="font-weight: 600; color: #2c3e50; display: block; margin-bottom: 8px;">
+                            Max Iterations: <span id="iterationsValue">3</span>
+                        </label>
+                        <input type="range" id="maxIterations" min="1" max="5" step="1" value="3"
+                               style="width: 100%;" oninput="updateIterationsValue()">
+                        <div style="display: flex; justify-content: space-between; font-size: 0.8em; color: #666; margin-top: 5px;">
+                            <span>1 (Fast)</span>
+                            <span>3 (Default)</span>
+                            <span>5 (Thorough)</span>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 12px; padding: 10px; background-color: rgba(255, 255, 255, 0.6); border-radius: 6px; font-size: 0.85em; color: #555;">
+                        <strong>Note:</strong> Higher values improve quality but take longer. Most cases converge in 1-2 iterations.
+                    </div>
+                </div>
+
+                <div id="checkerboardSettings" style="display: none; margin-top: 10px; padding: 15px; background-color: #f8f9fa; border-radius: 8px;">
+                    <label style="font-weight: 600; color: #2c3e50; display: block; margin-bottom: 8px;">Pattern Size:</label>
+                    <select id="patternSize" style="padding: 8px; border-radius: 6px; border: 2px solid #e0e0e0; width: 100%;">
+                        <option value="9,6" selected>9×6 corners (10×7 squares)</option>
+                        <option value="7,5">7×5 corners (8×6 squares)</option>
+                        <option value="8,6">8×6 corners (9×7 squares)</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="control-section">
                 <h3>🎯 Calibration Actions</h3>
 
                 <div class="button-group">
                     <button class="btn btn-primary" onclick="calibratePerspective()">
-                        🔄 Auto-Calibrate Perspective
+                        🔄 Calibrate
                     </button>
 
                     <button class="btn btn-warning" onclick="forceDetection()">
@@ -362,25 +424,35 @@
 
                 <div class="info-box warning">
                     <strong>Getting Started:</strong><br>
-                    1. Click "Auto-Calibrate" to run detection<br>
-                    2. Check the debug view for detected ellipse<br>
-                    3. If satisfied, click "Save Calibration"<br>
-                    4. Enable "Perspective Correction" to apply
+                    1. Select calibration method (Ellipse or Checkerboard)<br>
+                    2. Click "Calibrate" to run detection<br>
+                    3. Check the debug view for results<br>
+                    4. If satisfied, click "Save Calibration"<br>
+                    5. Enable "Perspective Correction" to apply
                 </div>
 
                 <div class="info-box">
-                    <strong>Auto-Calibrate Button:</strong><br>
-                    • Runs ellipse detection once (not continuous)<br>
-                    • Shows results in the debug view above<br>
-                    • Requires clear view of circular target ring<br>
-                    • Click again to re-run if needed
+                    <strong>Calibration Methods:</strong><br>
+                    • <strong>Ellipse:</strong> Detects circular target rings<br>
+                    • <strong>Checkerboard:</strong> Uses calibration pattern<br>
+                    • <strong>Auto:</strong> Tries ellipse first, fallback to checkerboard
+                </div>
+
+                <div class="info-box success">
+                    <strong>Iterative Refinement (NEW!):</strong><br>
+                    • Improves circularity through multiple corrections<br>
+                    • <strong>Quality Controls:</strong> Adjust target circularity & max iterations<br>
+                    • Default: 95% circularity in max 3 iterations<br>
+                    • Higher targets = better quality but slower<br>
+                    • Most cases converge in 1-2 iterations
                 </div>
 
                 <div class="info-box">
-                    <strong>Force Re-Detection:</strong><br>
-                    • Clears all cached detection data<br>
-                    • Use if previous calibration seems stuck<br>
-                    • Must run Auto-Calibrate again after
+                    <strong>Checkerboard Pattern:</strong><br>
+                    • Print standard checkerboard pattern<br>
+                    • Default: 9×6 internal corners (10×7 squares)<br>
+                    • Hold pattern flat in front of camera<br>
+                    • Ensure good lighting and full visibility
                 </div>
             </div>
         </div>
@@ -450,19 +522,91 @@
         }
 
         function calibratePerspective() {
-            showStatus('Calibrating perspective...', false);
+            const method = document.getElementById('calibrationMethod').value;
+            const iterative = document.getElementById('iterativeToggle').checked;
+            const patternSizeStr = document.getElementById('patternSize').value;
+            const patternSize = patternSizeStr.split(',').map(Number);
+
+            // Get quality settings for iterative mode
+            const targetCircularity = parseFloat(document.getElementById('targetCircularity').value);
+            const maxIterations = parseInt(document.getElementById('maxIterations').value);
+
+            let statusText = 'Calibrating perspective';
+            if (method === 'ellipse') {
+                if (iterative) {
+                    statusText += ` (iterative, target=${targetCircularity}, max=${maxIterations})...`;
+                } else {
+                    statusText += ' (single-pass)...';
+                }
+            } else if (method === 'checkerboard') {
+                statusText += ` (${patternSize[0]}×${patternSize[1]})...`;
+            } else {
+                statusText += ' (auto)...';
+            }
+
+            showStatus(statusText, false);
+
+            const payload = {
+                method: method,
+                iterative: iterative,
+                pattern_size: patternSize,
+                target_circularity: targetCircularity,
+                max_iterations: maxIterations
+            };
 
             fetch('/api/calibrate_perspective', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' }
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
             })
             .then(response => response.json())
             .then(data => {
-                showStatus(data.message, !data.success);
+                let message = data.message;
+                // Add iteration info if available
+                if (data.iterative && message.includes('iterations')) {
+                    message += ' ✓';
+                }
+                showStatus(message, !data.success);
             })
             .catch(error => {
                 showStatus('Error calibrating perspective: ' + error, true);
             });
+        }
+
+        function updateCircularityValue() {
+            const value = document.getElementById('targetCircularity').value;
+            document.getElementById('circularityValue').textContent = value;
+        }
+
+        function updateIterationsValue() {
+            const value = document.getElementById('maxIterations').value;
+            document.getElementById('iterationsValue').textContent = value;
+        }
+
+        function toggleIterativeSettings() {
+            const iterative = document.getElementById('iterativeToggle').checked;
+            const settings = document.getElementById('iterativeSettings');
+            settings.style.display = iterative ? 'block' : 'none';
+        }
+
+        // Toggle checkerboard settings visibility based on method
+        function updateMethodUI() {
+            const method = document.getElementById('calibrationMethod').value;
+            const checkerboardSettings = document.getElementById('checkerboardSettings');
+            const iterativeContainer = document.getElementById('iterativeToggleContainer');
+            const iterativeSettings = document.getElementById('iterativeSettings');
+
+            if (method === 'checkerboard') {
+                checkerboardSettings.style.display = 'block';
+                iterativeContainer.style.display = 'none';
+                iterativeSettings.style.display = 'none';
+            } else {
+                checkerboardSettings.style.display = 'none';
+                iterativeContainer.style.display = 'flex';
+                // Show iterative settings if toggle is checked
+                const iterativeEnabled = document.getElementById('iterativeToggle').checked;
+                iterativeSettings.style.display = iterativeEnabled ? 'block' : 'none';
+            }
         }
 
         function forceDetection() {
@@ -530,9 +674,13 @@
         document.addEventListener('DOMContentLoaded', () => {
             loadInitialState();
             checkConnection();
+            updateMethodUI();  // Initialize UI state
 
             // Check connection every 5 seconds
             setInterval(checkConnection, 5000);
+
+            // Add event listener for method changes
+            document.getElementById('calibrationMethod').addEventListener('change', updateMethodUI);
         });
 
         // Handle stream errors

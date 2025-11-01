@@ -1,0 +1,19 @@
+{
+  "brightness": 0.0,
+  "contrast": 32.0,
+  "saturation": 75.0,
+  "hue": 0.0,
+  "gain": 0.0,
+  "gamma": 100.0,
+  "exposure": 2400.0,
+  "auto_exposure": 1.0,
+  "auto_wb": 0.0,
+  "backlight": 1.0,
+  "sharpness": 3.0,
+  "temperature": 2800.0,
+  "wb_temperature": 2800.0,
+  "fourcc": 1448695129.0,
+  "frame_width": 640.0,
+  "frame_height": 480.0,
+  "fps": 30.0
+}

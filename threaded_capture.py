@@ -35,12 +35,35 @@ class FrameBuffer:
         self.frame_change_counter = 0  # Increments each time a new frame is added
 
     def put(self, frame):
-        """Add frame to buffer (thread-safe)"""
+        """Add frame to buffer (thread-safe) with validation"""
+        # Validate frame before adding to buffer
+        if frame is None:
+            return
+        if not hasattr(frame, 'shape') or not hasattr(frame, 'dtype'):
+            return
+        if frame.size == 0:
+            return
+        if len(frame.shape) < 2:
+            return
+        if frame.shape[0] <= 0 or frame.shape[1] <= 0:
+            return
+
         with self.lock:
-            self.buffer.append(frame.copy())
-            self.latest_frame = frame.copy()
-            self.frame_count += 1
-            self.frame_change_counter += 1  # Increment change counter
+            try:
+                # Make defensive copies to avoid corruption
+                frame_copy = frame.copy()
+                # Ensure frame is contiguous and uint8
+                if not frame_copy.flags['C_CONTIGUOUS']:
+                    frame_copy = frame_copy.copy()
+                if frame_copy.dtype != 'uint8':
+                    frame_copy = frame_copy.astype('uint8')
+
+                self.buffer.append(frame_copy)
+                self.latest_frame = frame_copy
+                self.frame_count += 1
+                self.frame_change_counter += 1  # Increment change counter
+            except Exception as e:
+                print(f"FrameBuffer: Error storing frame: {e}")
 
     def get_latest(self):
         """
@@ -52,7 +75,18 @@ class FrameBuffer:
         """
         with self.lock:
             if self.latest_frame is not None:
-                return self.latest_frame.copy(), self.frame_change_counter
+                try:
+                    # Make a safe copy with validation
+                    frame_copy = self.latest_frame.copy()
+                    # Additional safety: ensure contiguous and uint8
+                    if not frame_copy.flags['C_CONTIGUOUS']:
+                        frame_copy = frame_copy.copy()
+                    if frame_copy.dtype != 'uint8':
+                        frame_copy = frame_copy.astype('uint8')
+                    return frame_copy, self.frame_change_counter
+                except Exception as e:
+                    print(f"FrameBuffer: Error copying frame: {e}")
+                    return None, self.frame_change_counter
             return None, 0
 
     def get_buffer_copy(self):
@@ -145,8 +179,12 @@ class FrameReader(threading.Thread):
                 ret, frame = self.cap.read()
 
                 if ret and frame is not None:
-                    # Validate frame
-                    if len(frame.shape) >= 2 and frame.shape[0] > 0 and frame.shape[1] > 0:
+                    # Validate frame thoroughly
+                    if (hasattr(frame, 'shape') and
+                        len(frame.shape) >= 2 and
+                        frame.shape[0] > 0 and
+                        frame.shape[1] > 0 and
+                        frame.size > 0):
                         # Update frame number for video files
                         if self.source_type == "video":
                             self.current_frame_number = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
@@ -160,6 +198,10 @@ class FrameReader(threading.Thread):
                             elapsed = time.time() - start_time
                             actual_fps = frame_count / elapsed if elapsed > 0 else 0
                             print(f"FrameReader: {frame_count} frames captured ({actual_fps:.1f} FPS)")
+                    else:
+                        # Invalid frame received (possibly corrupted MJPEG)
+                        if frame_count % 50 == 0:  # Don't spam console
+                            print(f"FrameReader: Skipping invalid/corrupted frame")
                 else:
                     # Handle end of video file
                     if self.source_type == "video":
@@ -185,8 +227,13 @@ class FrameReader(threading.Thread):
 
         print("FrameReader: Capture loop stopped")
 
-    def stop(self):
-        """Stop the frame reader thread"""
+    def stop(self, timeout=2.0):
+        """Stop the frame reader thread and wait for it to finish
+
+        Args:
+            timeout: Maximum time to wait for thread to stop (seconds)
+        """
+        print("FrameReader: Stopping...")
         self.running = False
 
     def pause(self):
@@ -378,9 +425,13 @@ class VideoWriter(threading.Thread):
             while self.running:
                 try:
                     # Get latest frame from buffer
-                    frame = self.frame_buffer.get_latest()
+                    frame, _ = self.frame_buffer.get_latest()  # Unpack tuple
 
                     if frame is not None:
+                        # Validate frame before processing
+                        if not hasattr(frame, 'shape') or frame.size == 0:
+                            continue  # Skip invalid frame
+
                         # Ensure frame is correct size
                         frame_height, frame_width = frame.shape[:2]
                         if frame_width != self.frame_size[0] or frame_height != self.frame_size[1]:
@@ -519,12 +570,34 @@ class ThreadedCaptureSystem:
             )
             self.frame_reader.start()
 
-    def stop(self):
-        """Stop all threads"""
+    def stop(self, timeout=2.0):
+        """Stop all threads and wait for them to finish
+
+        Args:
+            timeout: Maximum time to wait for threads to stop (seconds)
+        """
+        print("ThreadedCaptureSystem: Stopping all threads...")
+
+        # Stop recording first
+        self.stop_recording()
+
+        # Stop frame reader and wait for it to finish
         if self.frame_reader:
             self.frame_reader.stop()
+
+            # Wait for thread to actually finish
+            if self.frame_reader.is_alive():
+                print(f"ThreadedCaptureSystem: Waiting up to {timeout}s for frame reader to stop...")
+                self.frame_reader.join(timeout=timeout)
+
+                if self.frame_reader.is_alive():
+                    print("ThreadedCaptureSystem: WARNING - Frame reader thread did not stop in time!")
+                else:
+                    print("ThreadedCaptureSystem: Frame reader stopped successfully")
+
             self.frame_reader = None
-        self.stop_recording()
+
+        print("ThreadedCaptureSystem: All threads stopped")
 
     def pause(self):
         """Pause frame reading"""
@@ -572,7 +645,7 @@ class ThreadedCaptureSystem:
 
         # Get frame size from latest frame if not specified
         if frame_size is None:
-            latest_frame = self.frame_buffer.get_latest()
+            latest_frame, _ = self.frame_buffer.get_latest()  # Unpack tuple (frame, change_counter)
             if latest_frame is None:
                 return False, "No frames available to determine size", None
             frame_size = (latest_frame.shape[1], latest_frame.shape[0])
