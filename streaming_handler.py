@@ -659,6 +659,10 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 presets = self.camera_controller.list_camera_presets()
                 response = {'success': True, 'presets': presets}
 
+            elif path == '/api/save_defaults':
+                success, message = self.camera_controller.save_camera_defaults()
+                response = {'success': success, 'message': message}
+
             elif path == '/api/set_resolution':
                 width = data.get('width', 0)
                 height = data.get('height', 0)

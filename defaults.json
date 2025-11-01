@@ -1,0 +1,17 @@
+{
+  "source_type": "video",
+  "camera_index": null,
+  "video_file": "./samples/recording_20251009_202417-3fps.mkv",
+  "resolution": [
+    2592,
+    1944
+  ],
+  "camera_fps": null,
+  "zoom": 1.0,
+  "pan_x": 0,
+  "pan_y": 0,
+  "rotation": 270,
+  "target_detection_enabled": false,
+  "perspective_correction_enabled": true,
+  "debug_mode": false
+}

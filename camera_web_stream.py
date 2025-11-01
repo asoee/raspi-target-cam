@@ -1239,6 +1239,142 @@ class CameraController:
             print(f"Error listing presets: {e}")
             return []
 
+    def save_camera_defaults(self):
+        """Save current camera settings as defaults.json"""
+        try:
+            # Build defaults dictionary with all camera settings
+            defaults = {
+                'source_type': self.source_type,
+                'camera_index': self.camera_index if self.source_type == 'camera' else None,
+                'video_file': self.video_file if self.source_type == 'video' else None,
+                'resolution': list(self.resolution),
+                'camera_fps': self.camera_fps,
+                'zoom': self.zoom,
+                'pan_x': self.pan_x,
+                'pan_y': self.pan_y,
+                'rotation': self.rotation,
+                'target_detection_enabled': self.target_detector.detection_enabled,
+                'perspective_correction_enabled': self.perspective_correction_enabled,
+                'debug_mode': self.target_detector.debug_mode,
+            }
+
+            # Add V4L2 camera controls if available
+            if self.cached_camera_controls.get('available'):
+                camera_controls = {}
+                for name, control_info in self.cached_camera_controls['controls'].items():
+                    camera_controls[name] = control_info.get('current')
+                defaults['camera_controls'] = camera_controls
+
+            # Save to defaults.json file
+            defaults_file = "./defaults.json"
+            with open(defaults_file, 'w') as f:
+                json.dump(defaults, f, indent=2)
+
+            print(f"Saved camera settings to {defaults_file}")
+            return True, f"Saved camera settings as defaults"
+        except Exception as e:
+            print(f"Error saving defaults: {e}")
+            return False, f"Error saving defaults: {str(e)}"
+
+    def load_camera_defaults(self):
+        """Load camera settings from defaults.json and apply them"""
+        try:
+            defaults_file = "./defaults.json"
+            if not os.path.exists(defaults_file):
+                print(f"No defaults file found at {defaults_file}")
+                return False, "No defaults file found"
+
+            with open(defaults_file, 'r') as f:
+                defaults = json.load(f)
+
+            print(f"Loading defaults from {defaults_file}")
+
+            # Apply video source first if different from current
+            if 'source_type' in defaults:
+                source_type = defaults['source_type']
+                if source_type == 'camera' and defaults.get('camera_index') is not None:
+                    camera_index = defaults['camera_index']
+                    if self.source_type != 'camera' or self.camera_index != camera_index:
+                        print(f"  Switching to camera {camera_index}")
+                        # Format: set_video_source expects string camera index
+                        success, message = self.set_video_source('camera', str(camera_index))
+                        if not success:
+                            print(f"  WARNING: Failed to switch to camera: {message}")
+                elif source_type == 'video' and defaults.get('video_file'):
+                    video_file = defaults['video_file']
+                    if self.source_type != 'video' or self.video_file != video_file:
+                        print(f"  Switching to video file: {video_file}")
+                        # Extract just the filename from the path
+                        filename = os.path.basename(video_file)
+                        success, message = self.set_video_source('video', filename)
+                        if not success:
+                            print(f"  WARNING: Failed to switch to video: {message}")
+                elif source_type == 'test':
+                    if self.source_type != 'test':
+                        print(f"  Switching to test pattern")
+                        success, message = self.set_video_source('test', '')
+                        if not success:
+                            print(f"  WARNING: Failed to switch to test: {message}")
+
+            # Apply resolution and FPS if specified
+            if 'resolution' in defaults and 'camera_fps' in defaults:
+                resolution = tuple(defaults['resolution'])
+                fps = defaults['camera_fps']
+                if self.source_type == 'camera':
+                    self.set_camera_resolution(resolution[0], resolution[1], fps if fps else 30, 'MJPG')
+                    print(f"  Applied resolution: {resolution[0]}x{resolution[1]}@{fps}fps")
+
+            # Apply basic camera settings
+            if 'zoom' in defaults:
+                self.zoom = defaults['zoom']
+                print(f"  Applied zoom: {self.zoom}")
+
+            if 'pan_x' in defaults and 'pan_y' in defaults:
+                self.pan_x = defaults['pan_x']
+                self.pan_y = defaults['pan_y']
+                print(f"  Applied pan: ({self.pan_x}, {self.pan_y})")
+
+            if 'rotation' in defaults:
+                self.rotation = defaults['rotation']
+                print(f"  Applied rotation: {self.rotation}")
+
+            if 'target_detection_enabled' in defaults:
+                self.target_detector.set_detection_enabled(defaults['target_detection_enabled'])
+                print(f"  Applied target detection: {defaults['target_detection_enabled']}")
+
+            if 'perspective_correction_enabled' in defaults:
+                self.perspective_correction_enabled = defaults['perspective_correction_enabled']
+                print(f"  Applied perspective correction: {defaults['perspective_correction_enabled']}")
+
+            if 'debug_mode' in defaults:
+                self.target_detector.set_debug_mode(defaults['debug_mode'])
+                print(f"  Applied debug mode: {defaults['debug_mode']}")
+
+            # Apply V4L2 camera controls if available and camera is open
+            if 'camera_controls' in defaults and self.cached_camera_controls.get('available'):
+                if self.cap and self.cap.isOpened():
+                    success_count = 0
+                    total_count = 0
+
+                    for name, value in defaults['camera_controls'].items():
+                        if name in self.cached_camera_controls['controls']:
+                            total_count += 1
+                            success, message = self.set_camera_control(name, value)
+                            if success:
+                                success_count += 1
+                            else:
+                                print(f"  Failed to apply default for {name}: {message}")
+
+                    print(f"  Applied {success_count}/{total_count} V4L2 camera controls")
+
+            return True, "Applied default settings"
+
+        except Exception as e:
+            print(f"Error loading defaults: {e}")
+            import traceback
+            traceback.print_exc()
+            return False, f"Error loading defaults: {str(e)}"
+
     def get_camera_formats(self):
         """Get available formats and resolutions for the current camera"""
         if self.source_type != 'camera':
@@ -1894,6 +2030,14 @@ def main():
         print("DEBUG: Creating CameraController...")
         camera_controller = CameraController(camera_index=0)
         print("DEBUG: CameraController created successfully")
+
+        # Load and apply defaults
+        print("DEBUG: Loading defaults...")
+        success, message = camera_controller.load_camera_defaults()
+        if success:
+            print(f"✅ {message}")
+        else:
+            print(f"⚠️  {message}")
 
         print("DEBUG: Starting capture...")
         if not camera_controller.start_capture():

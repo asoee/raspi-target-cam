@@ -280,18 +280,18 @@
                     </div>
                     <div class="control-row">
                         <label>Target Detection:</label>
-                        <select id="targetDetection" onchange="toggleTargetDetection()" disabled>
-                            <option value="true" selected>Enabled</option>
-                            <option value="false">Disabled</option>
-                        </select>
+                        <input type="checkbox" id="targetDetection" onchange="toggleTargetDetection()" disabled checked>
                     </div>
 
                     <div class="control-row">
                         <label>Perspective Correction:</label>
-                        <select id="perspectiveCorrection" onchange="togglePerspectiveCorrection()" disabled>
-                            <option value="true" selected>Enabled</option>
-                            <option value="false">Disabled</option>
-                        </select>
+                        <input type="checkbox" id="perspectiveCorrection" onchange="togglePerspectiveCorrection()" disabled checked>
+                    </div>
+
+                    <div class="control-row" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd;">
+                        <button onclick="saveAsDefaults()" id="saveDefaultsBtn" style="width: 100%; padding: 10px; font-weight: bold;" disabled>
+                            💾 Save Current Settings as Defaults
+                        </button>
                     </div>
                 </div>
 
@@ -976,7 +976,7 @@
         }
 
         function toggleTargetDetection() {
-            const enabled = document.getElementById('targetDetection').value === 'true';
+            const enabled = document.getElementById('targetDetection').checked;
             const status = enabled ? 'Enabling' : 'Disabling';
             updateStatus(`🎯 ${status} target detection...`, false);
 
@@ -992,7 +992,7 @@
         }
 
         function togglePerspectiveCorrection() {
-            const enabled = document.getElementById('perspectiveCorrection').value === 'true';
+            const enabled = document.getElementById('perspectiveCorrection').checked;
             const status = enabled ? 'Enabling' : 'Disabling';
             updateStatus(`🔧 ${status} perspective correction...`, false);
 
@@ -1632,6 +1632,24 @@
                 .catch(error => updateStatus(`❌ Save preset error: ${error}`, true));
         }
 
+        function saveAsDefaults() {
+            if (!confirm('Save current camera settings as defaults? These will be applied on startup.')) {
+                return;
+            }
+
+            updateStatus('💾 Saving current settings as defaults...', false);
+
+            apiCall('/api/save_defaults', {})
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => updateStatus(`❌ Save defaults error: ${error}`, true));
+        }
+
         function resetCameraControls() {
             if (!confirm('Reset all camera controls to their default values?')) {
                 return;
@@ -1928,8 +1946,8 @@
                     document.getElementById('panY').value = status.pan_y;
                     document.getElementById('panYValue').textContent = status.pan_y;
                     document.getElementById('rotation').value = status.rotation;
-                    document.getElementById('targetDetection').value = status.detection_enabled ? 'true' : 'false';
-                    document.getElementById('perspectiveCorrection').value = status.perspective_correction_enabled ? 'true' : 'false';
+                    document.getElementById('targetDetection').checked = status.detection_enabled;
+                    document.getElementById('perspectiveCorrection').checked = status.perspective_correction_enabled;
                     document.getElementById('debugMode').value = status.debug_mode ? 'true' : 'false';
                     document.getElementById('debugType').value = status.debug_type || 'combined';
                     document.getElementById('calibrationMode').value = status.calibration_mode ? 'true' : 'false';
@@ -1981,8 +1999,237 @@
 
                     // Update playback controls
                     updatePlaybackUI(status);
+
+                    // Enable save defaults button
+                    document.getElementById('saveDefaultsBtn').disabled = false;
                 })
                 .catch(error => console.error('Failed to load status:', error));
+        }
+
+        // Update all UI controls from status - sync across multiple windows
+        function updateAllControlsFromStatus(status, lastStatus) {
+            // Track if any changes were detected
+            let hasChanges = false;
+
+            // Debug: log perspective correction status
+            if (status.perspective_correction_enabled !== undefined) {
+                console.log(`Status perspective_correction_enabled: ${status.perspective_correction_enabled}, checkbox: ${document.getElementById('perspectiveCorrection')?.checked}`);
+            }
+
+            // Update zoom if changed
+            if (status.zoom !== lastStatus.zoom) {
+                const zoomSlider = document.getElementById('zoom');
+                if (zoomSlider && parseFloat(zoomSlider.value) !== status.zoom) {
+                    zoomSlider.value = status.zoom;
+                    document.getElementById('zoomValue').textContent = status.zoom + 'x';
+                    highlightControl(zoomSlider);
+                    hasChanges = true;
+                }
+            }
+
+            // Update pan X if changed
+            if (status.pan_x !== lastStatus.pan_x) {
+                const panXSlider = document.getElementById('panX');
+                if (panXSlider && parseInt(panXSlider.value) !== status.pan_x) {
+                    panXSlider.value = status.pan_x;
+                    document.getElementById('panXValue').textContent = status.pan_x;
+                    highlightControl(panXSlider);
+                    hasChanges = true;
+                }
+            }
+
+            // Update pan Y if changed
+            if (status.pan_y !== lastStatus.pan_y) {
+                const panYSlider = document.getElementById('panY');
+                if (panYSlider && parseInt(panYSlider.value) !== status.pan_y) {
+                    panYSlider.value = status.pan_y;
+                    document.getElementById('panYValue').textContent = status.pan_y;
+                    highlightControl(panYSlider);
+                    hasChanges = true;
+                }
+            }
+
+            // Update rotation if changed
+            if (status.rotation !== lastStatus.rotation) {
+                const rotationSelect = document.getElementById('rotation');
+                if (rotationSelect && parseInt(rotationSelect.value) !== status.rotation) {
+                    rotationSelect.value = status.rotation.toString();
+                    highlightControl(rotationSelect);
+                    hasChanges = true;
+                }
+            }
+
+            // Update target detection - only if changed from last status
+            if (status.detection_enabled !== lastStatus.detection_enabled && lastStatus.detection_enabled !== undefined) {
+                const detectionCheckbox = document.getElementById('targetDetection');
+                if (detectionCheckbox) {
+                    console.log(`Target detection changed externally: ${lastStatus.detection_enabled} -> ${status.detection_enabled}`);
+                    detectionCheckbox.checked = status.detection_enabled;
+                    highlightControl(detectionCheckbox);
+                    hasChanges = true;
+                }
+            }
+
+            // Update perspective correction - only if changed from last status
+            if (status.perspective_correction_enabled !== lastStatus.perspective_correction_enabled && lastStatus.perspective_correction_enabled !== undefined) {
+                const perspectiveCheckbox = document.getElementById('perspectiveCorrection');
+                if (perspectiveCheckbox) {
+                    console.log(`Perspective correction changed externally: ${lastStatus.perspective_correction_enabled} -> ${status.perspective_correction_enabled}`);
+                    perspectiveCheckbox.checked = status.perspective_correction_enabled;
+                    highlightControl(perspectiveCheckbox);
+                    hasChanges = true;
+                }
+            }
+
+            // Update debug mode if changed
+            if (status.debug_mode !== lastStatus.debug_mode) {
+                const debugModeSelect = document.getElementById('debugMode');
+                if (debugModeSelect && (debugModeSelect.value === 'true') !== status.debug_mode) {
+                    debugModeSelect.value = status.debug_mode ? 'true' : 'false';
+                    highlightControl(debugModeSelect);
+                    hasChanges = true;
+                }
+            }
+
+            // Update video source if changed
+            if (status.source_type !== lastStatus.source_type || status.current_source !== lastStatus.current_source) {
+                const sourceSelect = document.getElementById('videoSource');
+                if (sourceSelect) {
+                    let currentSourceValue = '';
+                    if (status.source_type === 'camera') {
+                        currentSourceValue = `camera|camera_${status.current_source}`;
+                    } else if (status.source_type === 'video') {
+                        const filename = status.current_source.split('/').pop();
+                        currentSourceValue = `video|video_${filename}`;
+                    } else if (status.source_type === 'test') {
+                        currentSourceValue = 'test|test_pattern';
+                    }
+
+                    // Update dropdown if value is different
+                    if (sourceSelect.value !== currentSourceValue) {
+                        for (let i = 0; i < sourceSelect.options.length; i++) {
+                            if (sourceSelect.options[i].value === currentSourceValue) {
+                                sourceSelect.selectedIndex = i;
+                                highlightControl(sourceSelect);
+                                hasChanges = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Update resolution if changed
+            if (status.actual_resolution &&
+                (status.actual_resolution[0] !== lastStatus.actual_resolution?.[0] ||
+                 status.actual_resolution[1] !== lastStatus.actual_resolution?.[1] ||
+                 status.actual_fps !== lastStatus.actual_fps)) {
+                const resolutionSelect = document.getElementById('resolution');
+                if (resolutionSelect && status.actual_resolution && status.actual_fps) {
+                    // Try to find matching resolution option with FPS and format
+                    let found = false;
+                    const targetWidth = status.actual_resolution[0];
+                    const targetHeight = status.actual_resolution[1];
+                    const targetFps = Math.round(status.actual_fps);
+
+                    // Try to match exact resolution@fps in dropdown
+                    for (let i = 0; i < resolutionSelect.options.length; i++) {
+                        const optValue = resolutionSelect.options[i].value;
+                        // Format: "640x480@30fps_MJPG"
+                        if (optValue.includes('@')) {
+                            const [resPart, fpsPart] = optValue.split('@');
+                            const [width, height] = resPart.split('x').map(Number);
+                            const fps = parseInt(fpsPart);
+
+                            if (width === targetWidth && height === targetHeight && Math.abs(fps - targetFps) <= 1) {
+                                if (resolutionSelect.value !== optValue) {
+                                    resolutionSelect.value = optValue;
+                                    highlightControl(resolutionSelect);
+                                    hasChanges = true;
+                                }
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    // If exact match not found, try to find just by resolution
+                    if (!found) {
+                        for (let i = 0; i < resolutionSelect.options.length; i++) {
+                            const optValue = resolutionSelect.options[i].value;
+                            if (optValue.startsWith(`${targetWidth}x${targetHeight}`)) {
+                                if (resolutionSelect.value !== optValue) {
+                                    resolutionSelect.value = optValue;
+                                    highlightControl(resolutionSelect);
+                                    hasChanges = true;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Update camera controls if available and changed
+            if (status.camera_controls && status.camera_controls.available) {
+                Object.keys(status.camera_controls.controls).forEach(controlName => {
+                    const control = status.camera_controls.controls[controlName];
+                    const element = document.getElementById(controlName);
+
+                    if (element && control.current !== undefined) {
+                        // Check if value changed
+                        const lastControl = lastStatus.camera_controls?.controls?.[controlName];
+                        if (!lastControl || control.current !== lastControl.current) {
+                            // Update the control value
+                            if (element.type === 'range' || element.type === 'number') {
+                                if (parseFloat(element.value) !== control.current) {
+                                    element.value = control.current;
+                                    updateControlValue(controlName, control.current);
+                                    highlightControl(element);
+                                    hasChanges = true;
+                                }
+                            } else if (element.tagName === 'SELECT') {
+                                if (element.value !== control.current.toString()) {
+                                    element.value = control.current.toString();
+                                    highlightControl(element);
+                                    hasChanges = true;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Update playback controls if video mode
+            if (status.supports_playback_controls) {
+                updatePlaybackUI(status);
+            }
+
+            // Update stream info display
+            updateStreamInfo(status);
+
+            // Log changes for debugging
+            if (hasChanges) {
+                console.log('UI controls updated from external changes');
+            }
+        }
+
+        // Highlight control briefly to show it was changed externally
+        function highlightControl(element) {
+            // Save original background
+            const originalBackground = element.style.backgroundColor;
+
+            // Apply highlight
+            element.style.backgroundColor = '#ffffcc';
+            element.style.transition = 'background-color 0.3s ease';
+
+            // Remove highlight after delay
+            setTimeout(() => {
+                element.style.backgroundColor = originalBackground;
+                setTimeout(() => {
+                    element.style.transition = '';
+                }, 300);
+            }, 500);
         }
 
         // Auto-refresh stream every 30 seconds to prevent timeout
@@ -1994,19 +2241,21 @@
             }
         }, 30000);
 
-        // Update playback controls every 2 seconds when video is active
+        // Poll status regularly to sync UI across multiple windows
+        let lastKnownStatus = {};
+
         setInterval(() => {
             if (streamConnected) {
                 fetch('/api/status')
                     .then(response => response.json())
                     .then(status => {
-                        if (status.supports_playback_controls) {
-                            updatePlaybackUI(status);
-                        }
+                        // Update all UI controls with current status
+                        updateAllControlsFromStatus(status, lastKnownStatus);
+                        lastKnownStatus = status;
                     })
-                    .catch(error => console.error('Failed to update playback status:', error));
+                    .catch(error => console.error('Failed to update status:', error));
             }
-        }, 2000);
+        }, 1000);  // Poll every 1 second for responsive sync
     </script>
 </body>
 </html>

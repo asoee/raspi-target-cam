@@ -1320,7 +1320,7 @@ class TargetDetector:
             'time_since_detection': time_since_detection,
             'using_cached_result': time_since_detection < self.detection_interval,
             'target_corners': self.target_corners.tolist() if self.target_corners is not None else None,
-            'perspective_correction_enabled': self.perspective_matrix is not None,
+            # Note: perspective_correction_enabled removed - now handled by CameraController
             'debug_mode': self.debug_mode,
             'debug_type': self.debug_type,
             'calibration_mode': self.calibration_mode,
