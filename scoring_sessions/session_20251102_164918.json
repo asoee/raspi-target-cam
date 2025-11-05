@@ -1,0 +1,78 @@
+{
+  "session_id": "20251102_164918",
+  "target_profile": {
+    "name": "large",
+    "outer_radius": 700.0,
+    "inner_black_radius": 350.0,
+    "ring_radii": {
+      "10": 0.0,
+      "9": 115.5,
+      "8": 234.5,
+      "7": 350.0,
+      "6": 437.5,
+      "5": 525.0,
+      "4": 612.5,
+      "3": 700.0
+    }
+  },
+  "target_center": [
+    1000,
+    1000
+  ],
+  "shots": [
+    {
+      "shot_number": 1,
+      "timestamp": "2025-11-02T16:49:18.980262",
+      "x": 1005,
+      "y": 1003,
+      "radius": 13,
+      "distance_from_center": 5.830951894845301,
+      "score": 9,
+      "detection_confidence": 0.95
+    },
+    {
+      "shot_number": 2,
+      "timestamp": "2025-11-02T16:49:18.980324",
+      "x": 1050,
+      "y": 1020,
+      "radius": 14,
+      "distance_from_center": 53.85164807134504,
+      "score": 9,
+      "detection_confidence": 0.9
+    },
+    {
+      "shot_number": 3,
+      "timestamp": "2025-11-02T16:49:18.980355",
+      "x": 1100,
+      "y": 1050,
+      "radius": 12,
+      "distance_from_center": 111.80339887498948,
+      "score": 9,
+      "detection_confidence": 0.85
+    },
+    {
+      "shot_number": 4,
+      "timestamp": "2025-11-02T16:49:18.980381",
+      "x": 1200,
+      "y": 1000,
+      "radius": 13,
+      "distance_from_center": 200.0,
+      "score": 8,
+      "detection_confidence": 0.92
+    },
+    {
+      "shot_number": 5,
+      "timestamp": "2025-11-02T16:49:18.980404",
+      "x": 1350,
+      "y": 1100,
+      "radius": 14,
+      "distance_from_center": 364.0054944640259,
+      "score": 6,
+      "detection_confidence": 0.88
+    }
+  ],
+  "total_score": 41,
+  "start_time": "2025-11-02T16:49:18.980175",
+  "end_time": "2025-11-02T16:49:18.980438",
+  "active": false
+}

@@ -1,0 +1,29 @@
+profiles:
+- inner_black_radius: 354.0
+  name: large
+  outer_radius: 707.0
+  ring_radii:
+    3: 707.0
+    4: 618.75
+    5: 530.5
+    6: 442.25
+    7: 354.0
+    8: 237.18
+    9: 116.82000000000001
+    10: 0.0
+- inner_black_radius: 0.0
+  name: small
+  outer_radius: 0.0
+  ring_radii: {}
+- inner_black_radius: 354.0
+  name: test
+  outer_radius: 707.0
+  ring_radii:
+    3: 707.0
+    4: 618.75
+    5: 530.5
+    6: 442.25
+    7: 354.0
+    8: 237.18
+    9: 116.82000000000001
+    10: 0.0

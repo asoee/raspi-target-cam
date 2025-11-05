@@ -1,0 +1,68 @@
+{
+  "session_id": "20251102_170221",
+  "target_profile": {
+    "name": "test",
+    "outer_radius": 707.0,
+    "inner_black_radius": 354.0,
+    "ring_radii": {
+      "10": 0.0,
+      "9": 116.82000000000001,
+      "8": 237.18,
+      "7": 354.0,
+      "6": 442.25,
+      "5": 530.5,
+      "4": 618.75,
+      "3": 707.0
+    }
+  },
+  "target_center": [
+    942,
+    1286
+  ],
+  "shots": [
+    {
+      "shot_number": 1,
+      "timestamp": "2025-11-02T17:02:21.387090",
+      "x": 1125,
+      "y": 1171,
+      "radius": 9,
+      "distance_from_center": 216.1342175593675,
+      "score": 8,
+      "detection_confidence": 0.6606670531276577
+    },
+    {
+      "shot_number": 2,
+      "timestamp": "2025-11-02T17:02:21.387269",
+      "x": 1171,
+      "y": 832,
+      "radius": 21,
+      "distance_from_center": 508.4850046953204,
+      "score": 5,
+      "detection_confidence": 0.5999370662678365
+    },
+    {
+      "shot_number": 3,
+      "timestamp": "2025-11-02T17:02:21.387370",
+      "x": 861,
+      "y": 789,
+      "radius": 20,
+      "distance_from_center": 503.557345294456,
+      "score": 5,
+      "detection_confidence": 0.5949473604829961
+    },
+    {
+      "shot_number": 4,
+      "timestamp": "2025-11-02T17:02:21.387428",
+      "x": 1032,
+      "y": 1060,
+      "radius": 15,
+      "distance_from_center": 243.26117651610582,
+      "score": 7,
+      "detection_confidence": 0.2794115587276108
+    }
+  ],
+  "total_score": 25,
+  "start_time": "2025-11-02T17:02:21.059322",
+  "end_time": "2025-11-02T17:02:21.660586",
+  "active": false
+}

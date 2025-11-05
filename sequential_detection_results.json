@@ -1,0 +1,62 @@
+{
+  "reference_frame": 50,
+  "total_shots": 7,
+  "shots": [
+    {
+      "shot_number": 1,
+      "x": 1124,
+      "y": 1173,
+      "frame_detected": 68,
+      "score": 41.011638960704005,
+      "darkness": 20.385382059800666
+    },
+    {
+      "shot_number": 2,
+      "x": 1070,
+      "y": 1296,
+      "frame_detected": 68,
+      "score": 25.575675675675676,
+      "darkness": 9.68918918918919
+    },
+    {
+      "shot_number": 3,
+      "x": 880,
+      "y": 1543,
+      "frame_detected": 93,
+      "score": 32.39641101278269,
+      "darkness": 10.597222222222221
+    },
+    {
+      "shot_number": 4,
+      "x": 944,
+      "y": 1374,
+      "frame_detected": 93,
+      "score": 30.433846153846154,
+      "darkness": 11.584615384615384
+    },
+    {
+      "shot_number": 5,
+      "x": 903,
+      "y": 1458,
+      "frame_detected": 93,
+      "score": 29.56966121050628,
+      "darkness": 10.295774647887324
+    },
+    {
+      "shot_number": 6,
+      "x": 1160,
+      "y": 1296,
+      "frame_detected": 104,
+      "score": 26.505549389567143,
+      "darkness": 9.617647058823529
+    },
+    {
+      "shot_number": 7,
+      "x": 930,
+      "y": 1550,
+      "frame_detected": 193,
+      "score": 48.05989159891598,
+      "darkness": 19.77777777777778
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "image_path": "test_frames/frame_0930_all_10_shots_corrected.jpg",
+  "image_resolution": {
+    "width": 1944,
+    "height": 2592
+  },
+  "total_holes": 10,
+  "holes": [
+    {
+      "hole_number": 1,
+      "x": 1124,
+      "y": 1171
+    },
+    {
+      "hole_number": 2,
+      "x": 1057,
+      "y": 1180
+    },
+    {
+      "hole_number": 3,
+      "x": 1072,
+      "y": 1305
+    },
+    {
+      "hole_number": 4,
+      "x": 992,
+      "y": 1360
+    },
+    {
+      "hole_number": 5,
+      "x": 927,
+      "y": 1465
+    },
+    {
+      "hole_number": 6,
+      "x": 952,
+      "y": 1168
+    },
+    {
+      "hole_number": 7,
+      "x": 1028,
+      "y": 1062
+    },
+    {
+      "hole_number": 8,
+      "x": 1024,
+      "y": 1022
+    },
+    {
+      "hole_number": 9,
+      "x": 1171,
+      "y": 831
+    },
+    {
+      "hole_number": 10,
+      "x": 861,
+      "y": 788
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "session_id": "20251102_170212",
+  "target_profile": {
+    "name": "test",
+    "outer_radius": 707.0,
+    "inner_black_radius": 354.0,
+    "ring_radii": {
+      "10": 0.0,
+      "9": 116.82000000000001,
+      "8": 237.18,
+      "7": 354.0,
+      "6": 442.25,
+      "5": 530.5,
+      "4": 618.75,
+      "3": 707.0
+    }
+  },
+  "target_center": [
+    942,
+    1286
+  ],
+  "shots": [
+    {
+      "shot_number": 1,
+      "timestamp": "2025-11-02T17:02:12.872267",
+      "x": 1130,
+      "y": 1172,
+      "radius": 10,
+      "distance_from_center": 219.8635940759634,
+      "score": 8,
+      "detection_confidence": 0.2749202015510179
+    }
+  ],
+  "total_score": 8,
+  "start_time": "2025-11-02T17:02:12.746128",
+  "end_time": "2025-11-02T17:02:13.127690",
+  "active": false
+}
