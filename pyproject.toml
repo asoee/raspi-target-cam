@@ -1,0 +1,79 @@
+[project]
+name = "raspi-target-cam"
+version = "0.1.0"
+description = "Raspberry Pi camera targeting system with OpenCV computer vision"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {file = "LICENSE"}
+authors = [
+    {name = "raspi-target-cam contributors"}
+]
+keywords = ["opencv", "computer-vision", "raspberry-pi", "camera", "target-detection"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "opencv-python>=4.5.0",
+    "numpy>=1.19.0",
+    "PyYAML>=5.4.0",
+    "linuxpy>=0.23.0",
+    "Pillow>=9.0.0",
+    "piexif>=1.1.3",
+    "pupil-labs-uvc @ git+https://github.com/pupil-labs/pyuvc.git",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "scipy>=1.7.0",
+    "requests>=2.25.0",
+]
+
+[project.scripts]
+raspi-cam-stream = "raspi_target_cam.web.camera_web_stream:main"
+raspi-cam-detect = "raspi_target_cam.camera.cam_detect:main"
+raspi-list-cameras = "raspi_target_cam.camera.list_cameras:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/raspi_target_cam"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["raspi_target_cam"]

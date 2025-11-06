@@ -207,11 +207,22 @@ marimo/_lsp/
 __marimo__/
 
 .idea/
-captures/
-recordings/
-samples/
+
+# Project-specific data directories (now in data/)
+data/captures/
+data/recordings/
+data/samples/
+data/test_frames/
+data/scoring_sessions/
+data/presets/
+
+# Test outputs
 /test_outputs/
 
+# Video files
 *.avi
 *.mp4
 *.mkv
+
+# UV lock file (keep this for reproducibility)
+# Uncomment if you want to ignore: uv.lock
