@@ -374,7 +374,7 @@ class FrameReader(threading.Thread):
         Returns:
             True if command was queued successfully
         """
-        from camera_settings import SeekCommand
+        from raspi_target_cam.camera.camera_settings import SeekCommand
         return self.send_command(SeekCommand(frame_number))
 
     def step_forward(self) -> bool:

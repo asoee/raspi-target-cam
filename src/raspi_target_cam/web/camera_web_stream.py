@@ -907,8 +907,8 @@ class CameraController:
                 # Get metadata
                 metadata = self._get_camera_controls_metadata()
 
-                # First save with OpenCV
-                cv2.imwrite(filepath, self.frame)
+                # Save with OpenCV at 100% JPEG quality (lossless compression)
+                cv2.imwrite(filepath, self.frame, [cv2.IMWRITE_JPEG_QUALITY, 100])
 
                 # Embed metadata as EXIF
                 MetadataHandler.embed_image_metadata(filepath, metadata)
