@@ -52,6 +52,7 @@ from functools import partial
 from raspi_target_cam.core.target_detection import TargetDetector
 from raspi_target_cam.core.perspective import Perspective
 from raspi_target_cam.detection.bullet_hole_detection import BulletHoleDetector
+from raspi_target_cam.detection.yolo_detector import YoloDetector
 from raspi_target_cam.camera.camera_controls import CameraControlManager
 from raspi_target_cam.core.streaming_handler import StreamingHandler
 from raspi_target_cam.utils.metadata_handler import MetadataHandler
@@ -137,9 +138,15 @@ class CameraController:
         self.test_frame_counter = 0
         
         # Bullet hole detection
+        self.detector_type = "traditional"  # "traditional" or "yolo"
         self.bullet_hole_detector = BulletHoleDetector()
+        self.yolo_detector = None  # Lazy-loaded when first used
+        self.yolo_conf_threshold = 0.7  # Confidence threshold for YOLO (0.0-1.0, higher = fewer false positives)
         self.reference_frame = None  # Store reference frame for bullet hole detection
         self.bullet_holes = []  # Detected bullet holes
+        self.continuous_detection = False  # Run detection on every frame (for YOLO)
+        self.detection_interval = 0  # Frames between detections (0 = every frame)
+        self.frame_count = 0  # Counter for detection interval
 
         # Camera controls
         self.camera_controls = None  # Will be initialized when camera is opened
@@ -429,6 +436,14 @@ class CameraController:
                     # Apply transformations (rotation, zoom, pan, perspective, detection)
                     # Note: _apply_transformations stores the rotated frame as self.raw_frame
                     processed_frame = self._apply_transformations(raw_frame)
+
+                    # Run continuous detection if enabled (for YOLO)
+                    if self.continuous_detection and self.detector_type == "yolo":
+                        self.frame_count += 1
+                        # Check if we should run detection on this frame
+                        if self.frame_count > self.detection_interval:
+                            self.frame_count = 0
+                            self._run_continuous_detection(processed_frame)
 
                     # Update display frame (thread-safe)
                     with self.lock:
@@ -927,20 +942,37 @@ class CameraController:
     
     def detect_bullet_holes(self):
         """Detect bullet holes by comparing current frame with reference"""
-        if self.reference_frame is None:
+        if self.reference_frame is None and self.detector_type == "traditional":
             return False, "No reference frame set"
-            
+
         with self.lock:
             if self.frame is not None:
-                # Detect bullet holes
-                holes = self.bullet_hole_detector.detect_bullet_holes(
-                    self.reference_frame, self.frame)
-                
+                # Select detector based on type
+                if self.detector_type == "yolo":
+                    # Initialize YOLO detector if not already loaded
+                    if self.yolo_detector is None:
+                        try:
+                            print(f"Loading YOLO detector with confidence threshold {self.yolo_conf_threshold}...")
+                            self.yolo_detector = YoloDetector(conf_threshold=self.yolo_conf_threshold, target_class=0)
+                            print("YOLO detector loaded successfully")
+                        except Exception as e:
+                            return False, f"Failed to load YOLO detector: {e}"
+
+                    # YOLO detector works on single frame (doesn't need reference)
+                    holes = self.yolo_detector.detect_bullet_holes(
+                        self.reference_frame if self.reference_frame is not None else self.frame,
+                        self.frame)
+                else:
+                    # Traditional detector needs reference frame
+                    holes = self.bullet_hole_detector.detect_bullet_holes(
+                        self.reference_frame, self.frame)
+
                 # Store detected holes and cache in detector for overlay
                 self.bullet_holes = holes
+                # Also cache in traditional detector for compatibility with overlay system
                 self.bullet_hole_detector.last_detection = holes
-                return True, f"Found {len(holes)} bullet hole(s)"
-        
+                return True, f"Found {len(holes)} bullet hole(s) using {self.detector_type} detector"
+
         return False, "No current frame available"
     
     def clear_bullet_holes(self):
@@ -948,6 +980,85 @@ class CameraController:
         self.bullet_holes = []
         self.bullet_hole_detector.last_detection = []
         return True
+
+    def set_detector_type(self, detector_type):
+        """Set the bullet hole detector type"""
+        if detector_type not in ["traditional", "yolo"]:
+            return False, f"Invalid detector type: {detector_type}"
+
+        self.detector_type = detector_type
+
+        # Pre-load YOLO detector if selected
+        if detector_type == "yolo" and self.yolo_detector is None:
+            try:
+                print(f"Pre-loading YOLO detector with confidence threshold {self.yolo_conf_threshold}...")
+                self.yolo_detector = YoloDetector(conf_threshold=self.yolo_conf_threshold, target_class=0)
+                print("YOLO detector loaded successfully")
+            except Exception as e:
+                return False, f"Failed to load YOLO detector: {e}"
+
+        return True, f"Detector type set to: {detector_type}"
+
+    def get_detector_type(self):
+        """Get current detector type"""
+        return self.detector_type
+
+    def set_continuous_detection(self, enabled):
+        """Enable or disable continuous detection (runs on every frame)"""
+        self.continuous_detection = enabled
+        if enabled and self.detector_type == "yolo":
+            # Pre-load YOLO detector
+            if self.yolo_detector is None:
+                try:
+                    print(f"Pre-loading YOLO detector for continuous detection with confidence threshold {self.yolo_conf_threshold}...")
+                    self.yolo_detector = YoloDetector(conf_threshold=self.yolo_conf_threshold, target_class=0)
+                    print("YOLO detector loaded successfully")
+                except Exception as e:
+                    return False, f"Failed to load YOLO detector: {e}"
+        return True, f"Continuous detection {'enabled' if enabled else 'disabled'}"
+
+    def get_continuous_detection(self):
+        """Get continuous detection status"""
+        return self.continuous_detection
+
+    def set_yolo_confidence(self, confidence):
+        """Set YOLO confidence threshold and reload detector if already loaded"""
+        if not (0.0 <= confidence <= 1.0):
+            return False, "Confidence must be between 0.0 and 1.0"
+
+        self.yolo_conf_threshold = confidence
+
+        # Reload detector if it's already loaded
+        if self.yolo_detector is not None:
+            try:
+                print(f"Reloading YOLO detector with new confidence threshold {confidence}...")
+                self.yolo_detector = YoloDetector(conf_threshold=confidence, target_class=0)
+                print("YOLO detector reloaded successfully")
+            except Exception as e:
+                return False, f"Failed to reload YOLO detector: {e}"
+
+        return True, f"YOLO confidence threshold set to {confidence:.2f}"
+
+    def get_yolo_confidence(self):
+        """Get current YOLO confidence threshold"""
+        return self.yolo_conf_threshold
+
+    def _run_continuous_detection(self, frame):
+        """Run detection on current frame (called from processing loop)"""
+        try:
+            if self.yolo_detector is None:
+                return
+
+            # Run YOLO detection on current frame
+            holes = self.yolo_detector.detect(frame, debug=False)
+
+            # Update bullet holes (thread-safe)
+            with self.lock:
+                self.bullet_holes = holes
+                self.bullet_hole_detector.last_detection = holes
+
+        except Exception as e:
+            print(f"Error in continuous detection: {e}")
     
     def get_bullet_hole_debug_frame(self, frame_type='combined'):
         """Get bullet hole detection debug frame"""
@@ -1377,6 +1488,14 @@ class CameraController:
             if 'perspective_correction_enabled' in defaults:
                 self.perspective_correction_enabled = defaults['perspective_correction_enabled']
                 print(f"  Applied perspective correction: {defaults['perspective_correction_enabled']}")
+
+            if 'detector_type' in defaults:
+                detector_type = defaults['detector_type']
+                success, message = self.set_detector_type(detector_type)
+                if success:
+                    print(f"  Applied detector type: {detector_type}")
+                else:
+                    print(f"  WARNING: Failed to set detector type: {message}")
 
             if 'debug_mode' in defaults:
                 self.target_detector.set_debug_mode(defaults['debug_mode'])

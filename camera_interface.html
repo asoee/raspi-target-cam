@@ -628,9 +628,31 @@
                     <h3>🎯 Bullet Hole Detection</h3>
 
                     <div class="control-row">
+                        <label>Detector Type:</label>
+                        <select id="detectorType" onchange="changeDetectorType()" disabled>
+                            <option value="traditional">Traditional (diff-based)</option>
+                            <option value="yolo">YOLO11 (AI-based)</option>
+                        </select>
+                    </div>
+
+                    <div class="control-row">
+                        <label>Continuous Detection:</label>
+                        <input type="checkbox" id="continuousDetection" onchange="toggleContinuousDetection()" disabled>
+                        <span style="font-size: 0.85em; color: #888;">(YOLO only: auto-detect every frame)</span>
+                    </div>
+
+                    <div class="control-row">
+                        <label>YOLO Confidence:</label>
+                        <input type="range" id="yoloConfidence" min="0.10" max="0.95" step="0.05" value="0.70"
+                               oninput="updateYoloConfidenceDisplay()" onchange="setYoloConfidence()" disabled>
+                        <span class="value-display" id="yoloConfidenceValue">0.70</span>
+                    </div>
+
+                    <div class="control-row">
                         <button onclick="setReferenceFrame()" disabled id="setRefBtn">
                             📋 Set Reference Frame
                         </button>
+                        <span id="referenceStatus" style="font-size: 0.9em; color: #888;"></span>
                     </div>
 
                     <div class="control-row">
@@ -689,6 +711,7 @@
             streamConnected = true;
             updateStatus("✅ Camera stream connected", false);
             enableControls();
+            loadDetectorType(); // Load current detector type from server
         }
 
         function handleStreamError() {
@@ -704,7 +727,7 @@
         }
 
         function enableControls() {
-            const controls = ['videoSource', 'resolution', 'fpsSlider', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'perspectiveCorrection', 'debugMode', 'debugType', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn', 'setRefBtn'];
+            const controls = ['videoSource', 'resolution', 'fpsSlider', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'perspectiveCorrection', 'debugMode', 'debugType', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn', 'detectorType', 'continuousDetection', 'setRefBtn'];
             controls.forEach(id => {
                 document.getElementById(id).disabled = false;
             });
@@ -1246,7 +1269,7 @@
                 .then(response => {
                     if (response.success) {
                         updateStatus(`✅ ${response.message}`, false);
-                        
+
                         // Reset bullet hole count
                         document.getElementById('bulletHoleCount').textContent = '0';
                     } else {
@@ -1254,6 +1277,147 @@
                     }
                 })
                 .catch(error => updateStatus(`❌ Clear holes error: ${error}`, true));
+        }
+
+        function changeDetectorType() {
+            const detectorType = document.getElementById('detectorType').value;
+            updateStatus(`🔄 Switching to ${detectorType} detector...`, false);
+
+            apiCall('/api/set_detector_type', { detector_type: detectorType })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+
+                        // Update reference frame requirement message
+                        const refStatus = document.getElementById('referenceStatus');
+                        if (detectorType === 'yolo') {
+                            refStatus.textContent = '(YOLO: Reference frame optional)';
+                            refStatus.style.color = '#27ae60';
+                        } else {
+                            refStatus.textContent = '(Required for traditional detector)';
+                            refStatus.style.color = '#e74c3c';
+                        }
+
+                        // Update continuous detection availability
+                        updateContinuousDetectionAvailability(detectorType);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                        // Revert selection on failure
+                        loadDetectorType();
+                    }
+                })
+                .catch(error => {
+                    updateStatus(`❌ Detector change error: ${error}`, true);
+                    // Revert selection on error
+                    loadDetectorType();
+                });
+        }
+
+        function loadDetectorType() {
+            apiCall('/api/get_detector_type', {})
+                .then(response => {
+                    if (response.success && response.detector_type) {
+                        document.getElementById('detectorType').value = response.detector_type;
+
+                        // Update reference frame requirement message
+                        const refStatus = document.getElementById('referenceStatus');
+                        if (response.detector_type === 'yolo') {
+                            refStatus.textContent = '(YOLO: Reference frame optional)';
+                            refStatus.style.color = '#27ae60';
+                        } else {
+                            refStatus.textContent = '(Required for traditional detector)';
+                            refStatus.style.color = '#e74c3c';
+                        }
+
+                        // Update continuous detection checkbox enable/disable
+                        updateContinuousDetectionAvailability(response.detector_type);
+                    }
+                })
+                .catch(error => console.error('Failed to load detector type:', error));
+
+            // Also load continuous detection status
+            apiCall('/api/get_continuous_detection', {})
+                .then(response => {
+                    if (response.success) {
+                        document.getElementById('continuousDetection').checked = response.continuous_detection;
+                    }
+                })
+                .catch(error => console.error('Failed to load continuous detection:', error));
+
+            // Load YOLO confidence threshold
+            loadYoloConfidence();
+        }
+
+        function toggleContinuousDetection() {
+            const enabled = document.getElementById('continuousDetection').checked;
+            updateStatus(`${enabled ? 'Enabling' : 'Disabling'} continuous detection...`, false);
+
+            apiCall('/api/set_continuous_detection', { enabled: enabled })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                        // Revert checkbox on failure
+                        document.getElementById('continuousDetection').checked = !enabled;
+                    }
+                })
+                .catch(error => {
+                    updateStatus(`❌ Continuous detection error: ${error}`, true);
+                    // Revert checkbox on error
+                    document.getElementById('continuousDetection').checked = !enabled;
+                });
+        }
+
+        function updateContinuousDetectionAvailability(detectorType) {
+            const checkbox = document.getElementById('continuousDetection');
+            const confidenceSlider = document.getElementById('yoloConfidence');
+
+            if (detectorType === 'yolo') {
+                checkbox.disabled = false;
+                checkbox.title = 'Enable continuous detection on every frame';
+                confidenceSlider.disabled = false;
+            } else {
+                checkbox.disabled = true;
+                checkbox.checked = false;
+                checkbox.title = 'Only available with YOLO detector';
+                confidenceSlider.disabled = true;
+            }
+        }
+
+        function updateYoloConfidenceDisplay() {
+            const slider = document.getElementById('yoloConfidence');
+            const display = document.getElementById('yoloConfidenceValue');
+            display.textContent = parseFloat(slider.value).toFixed(2);
+        }
+
+        function setYoloConfidence() {
+            const confidence = parseFloat(document.getElementById('yoloConfidence').value);
+            updateStatus(`🎯 Setting YOLO confidence to ${confidence.toFixed(2)}...`, false);
+
+            apiCall('/api/set_yolo_confidence', { confidence: confidence })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                    }
+                })
+                .catch(error => {
+                    updateStatus(`❌ YOLO confidence error: ${error}`, true);
+                });
+        }
+
+        function loadYoloConfidence() {
+            apiCall('/api/get_yolo_confidence', {})
+                .then(response => {
+                    if (response.success && response.confidence !== undefined) {
+                        const slider = document.getElementById('yoloConfidence');
+                        slider.value = response.confidence;
+                        updateYoloConfidenceDisplay();
+                    }
+                })
+                .catch(error => console.error('Failed to load YOLO confidence:', error));
         }
 
         function pausePlayback() {

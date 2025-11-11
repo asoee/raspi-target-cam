@@ -24,6 +24,8 @@ dependencies = [
     "Pillow>=9.0.0",
     "piexif>=1.1.3",
     "pupil-labs-uvc @ git+https://github.com/pupil-labs/pyuvc.git",
+    "ultralytics>=8.0.0",
+    "ncnn==1.0.20250916",
 ]
 
 [project.optional-dependencies]

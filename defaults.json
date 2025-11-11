@@ -1,7 +1,7 @@
 {
   "source_type": "video",
   "camera_index": null,
-  "video_file": "./samples/recording_20251009_202417-3fps.mkv",
+  "video_file": "./data/samples/recording_20251106_195254.mkv",
   "resolution": [
     2592,
     1944

@@ -525,6 +525,30 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 else:
                     response = {'success': False, 'message': 'Failed to clear bullet holes'}
 
+            elif path == '/api/set_detector_type':
+                detector_type = data.get('detector_type', 'traditional')
+                success, message = self.camera_controller.set_detector_type(detector_type)
+                response = {'success': success, 'message': message, 'detector_type': self.camera_controller.get_detector_type()}
+
+            elif path == '/api/get_detector_type':
+                response = {'success': True, 'detector_type': self.camera_controller.get_detector_type()}
+
+            elif path == '/api/set_continuous_detection':
+                enabled = data.get('enabled', False)
+                success, message = self.camera_controller.set_continuous_detection(enabled)
+                response = {'success': success, 'message': message, 'continuous_detection': self.camera_controller.get_continuous_detection()}
+
+            elif path == '/api/get_continuous_detection':
+                response = {'success': True, 'continuous_detection': self.camera_controller.get_continuous_detection()}
+
+            elif path == '/api/set_yolo_confidence':
+                confidence = data.get('confidence', 0.5)
+                success, message = self.camera_controller.set_yolo_confidence(float(confidence))
+                response = {'success': success, 'message': message, 'confidence': self.camera_controller.get_yolo_confidence()}
+
+            elif path == '/api/get_yolo_confidence':
+                response = {'success': True, 'confidence': self.camera_controller.get_yolo_confidence()}
+
             elif path == '/api/change_source':
                 source_type = data.get('source_type', '')
                 source_id = data.get('source_id', '')
