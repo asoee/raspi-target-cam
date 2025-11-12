@@ -59,12 +59,12 @@ class YoloDetector:
 
             # Try .pt model first, then NCNN model
             pt_path = project_root / "data" / "models" / "gen21-640.pt"
-            ncnn_path = project_root / "data" / "models" / "train21-640" / "model.ncnn.param"
+            ncnn_path = project_root / "data" / "models" / "train21-640_ncnn_model"
 
-            if pt_path.exists():
-                model_path = pt_path
-            elif ncnn_path.exists():
+            if ncnn_path.exists():
                 model_path = ncnn_path
+            elif pt_path.exists():
+                model_path = pt_path
             else:
                 raise FileNotFoundError(f"No model found at {pt_path} or {ncnn_path}")
         else:

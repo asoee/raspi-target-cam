@@ -53,6 +53,7 @@ from raspi_target_cam.core.target_detection import TargetDetector
 from raspi_target_cam.core.perspective import Perspective
 from raspi_target_cam.detection.bullet_hole_detection import BulletHoleDetector
 from raspi_target_cam.detection.yolo_detector import YoloDetector
+from raspi_target_cam.detection.bullet_hole_tracker import BulletHoleTracker
 from raspi_target_cam.camera.camera_controls import CameraControlManager
 from raspi_target_cam.core.streaming_handler import StreamingHandler
 from raspi_target_cam.utils.metadata_handler import MetadataHandler
@@ -143,10 +144,17 @@ class CameraController:
         self.yolo_detector = None  # Lazy-loaded when first used
         self.yolo_conf_threshold = 0.7  # Confidence threshold for YOLO (0.0-1.0, higher = fewer false positives)
         self.reference_frame = None  # Store reference frame for bullet hole detection
-        self.bullet_holes = []  # Detected bullet holes
+        self.bullet_holes = []  # Detected bullet holes (stable tracked holes)
         self.continuous_detection = False  # Run detection on every frame (for YOLO)
         self.detection_interval = 0  # Frames between detections (0 = every frame)
         self.frame_count = 0  # Counter for detection interval
+
+        # Bullet hole tracker (for temporal filtering and position averaging)
+        self.bullet_hole_tracker = BulletHoleTracker(
+            match_distance_threshold=30.0,  # Max 30px distance to match holes
+            max_frames_missing=5,  # Remove holes after 5 frames without detection
+            min_detections_for_stability=3  # Require 3 detections before showing
+        )
 
         # Camera controls
         self.camera_controls = None  # Will be initialized when camera is opened
@@ -433,21 +441,32 @@ class CameraController:
                     # Update last processed change counter
                     last_processed_change_counter = change_counter
 
-                    # Apply transformations (rotation, zoom, pan, perspective, detection)
+                    # Step 1: Apply pre-detection transformations (rotation + perspective correction)
                     # Note: _apply_transformations stores the rotated frame as self.raw_frame
-                    processed_frame = self._apply_transformations(raw_frame)
+                    corrected_frame = self._apply_transformations(raw_frame)
 
-                    # Run continuous detection if enabled (for YOLO)
+                    # Step 2: Run continuous detection if enabled (on corrected frame, before zoom/pan)
+                    # IMPORTANT: Detection runs on perspective-corrected frame, not zoomed/panned view
                     if self.continuous_detection and self.detector_type == "yolo":
                         self.frame_count += 1
                         # Check if we should run detection on this frame
                         if self.frame_count > self.detection_interval:
                             self.frame_count = 0
-                            self._run_continuous_detection(processed_frame)
+                            self._run_continuous_detection(corrected_frame)
+
+                    # Step 3: Add bullet hole overlays (on corrected frame, before zoom/pan)
+                    display_frame = corrected_frame
+                    if self.bullet_holes:
+                        display_frame = self.bullet_hole_detector.draw_bullet_hole_overlays(
+                            corrected_frame, self.bullet_holes
+                        )
+
+                    # Step 4: Apply display transformations (zoom/pan) for UI
+                    display_frame = self._apply_display_transformations(display_frame)
 
                     # Update display frame (thread-safe)
                     with self.lock:
-                        self.frame = processed_frame.copy()  # Store processed frame for streaming
+                        self.frame = display_frame.copy()  # Store display frame for streaming
 
                     # Update playback position for video files
                     if self.source_type == "video":
@@ -468,46 +487,46 @@ class CameraController:
         print("DEBUG: Processing loop stopped")
 
     def _apply_transformations(self, frame):
-        """Apply rotation, zoom, pan, and perspective transformations to frame"""
-        original_size = (frame.shape[1], frame.shape[0])  # (width, height)
+        """Apply rotation and perspective correction (pre-detection transformations)
 
+        Args:
+            frame: Input frame
+
+        Returns:
+            Transformed frame ready for detection (rotation + perspective correction applied)
+        """
         # Apply rotation first
         if self.rotation != 0:
             frame = self._rotate_frame(frame, self.rotation)
 
         # Store rotated frame as raw frame (for calibration - includes rotation but no overlays)
-        # This must be stored here before target detection overlays are added
         with self.lock:
             self.raw_frame = frame.copy()
 
-        # Handle perspective correction and target detection together
+        # Apply perspective correction
         if self.perspective_correction_enabled:
             corrected_frame = self.perspective.apply_perspective_correction(frame)
             if corrected_frame is not None:
                 frame = corrected_frame
-        # if self.target_detection
-        #     else:
-        #         # Perspective correction failed, run detection on original frame
-        #         frame = self.target_detector.draw_target_overlay(frame, 
-        #                                                        target_info=self.target_detector.detect_target(frame), 
-        #                                                        frame_is_corrected=False)
-        # else:
-        #     # No perspective correction, run target detection on original frame
-        #     frame = self.target_detector.draw_target_overlay(frame, 
-        #                                                    target_info=self.target_detector.detect_target(frame), 
-        #                                                    frame_is_corrected=False)
-        
-        # Add bullet hole overlays if any have been detected
-        if self.bullet_holes:
-            frame = self.bullet_hole_detector.draw_bullet_hole_overlays(frame, self.bullet_holes)
 
-        # Skip other transformations if no zoom or pan
+        return frame
+
+    def _apply_display_transformations(self, frame):
+        """Apply zoom and pan for display (post-detection transformations)
+
+        Args:
+            frame: Input frame (should already have rotation and perspective correction applied)
+
+        Returns:
+            Frame with zoom/pan applied for display
+        """
+        # Skip if no zoom or pan
         if self.zoom == 1.0 and self.pan_x == 0 and self.pan_y == 0:
             return frame
 
         h, w = frame.shape[:2]
 
-        # Apply zoom
+        # Apply zoom and pan
         if self.zoom > 1.0:
             # Calculate crop dimensions
             crop_w = int(w / self.zoom)
@@ -979,6 +998,7 @@ class CameraController:
         """Clear all detected bullet holes"""
         self.bullet_holes = []
         self.bullet_hole_detector.last_detection = []
+        self.bullet_hole_tracker.reset()  # Also reset the tracker
         return True
 
     def set_detector_type(self, detector_type):
@@ -1049,13 +1069,17 @@ class CameraController:
             if self.yolo_detector is None:
                 return
 
-            # Run YOLO detection on current frame
-            holes = self.yolo_detector.detect(frame, debug=False)
+            # Run YOLO detection on current frame (raw detections)
+            raw_detections = self.yolo_detector.detect(frame, debug=False)
 
-            # Update bullet holes (thread-safe)
+            # Update tracker with raw detections
+            # Tracker will filter out noise and average positions
+            stable_holes = self.bullet_hole_tracker.update(raw_detections)
+
+            # Update bullet holes with stable tracked holes (thread-safe)
             with self.lock:
-                self.bullet_holes = holes
-                self.bullet_hole_detector.last_detection = holes
+                self.bullet_holes = stable_holes
+                self.bullet_hole_detector.last_detection = stable_holes
 
         except Exception as e:
             print(f"Error in continuous detection: {e}")
