@@ -33,6 +33,7 @@ class YoloDetector:
         conf_threshold: float = 0.5,
         iou_threshold: float = 0.45,
         target_class: int = 0,
+        target_detector=None,
     ):
         """
         Initialize YOLO detector
@@ -43,6 +44,7 @@ class YoloDetector:
             conf_threshold: Confidence threshold for detections (0.0-1.0)
             iou_threshold: IoU threshold for NMS (0.0-1.0)
             target_class: Class ID to detect (0=bullet_hole, 1=target_pistol). Default: 0
+            target_detector: Optional TargetDetector instance for target-centered cropping
         """
         if not ULTRALYTICS_AVAILABLE:
             raise ImportError("ultralytics is required for YoloDetector. Install with: uv pip install ultralytics")
@@ -50,6 +52,7 @@ class YoloDetector:
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
         self.target_class = target_class
+        self.target_detector = target_detector
 
         # Set default model path if not provided
         if model_path is None:
@@ -59,7 +62,7 @@ class YoloDetector:
 
             # Try .pt model first, then NCNN model
             pt_path = project_root / "data" / "models" / "gen21-640.pt"
-            ncnn_path = project_root / "data" / "models" / "train21-640_ncnn_model"
+            ncnn_path = project_root / "data" / "models" / "n_480px3_1cls_ncnn_model"
 
             if ncnn_path.exists():
                 model_path = ncnn_path
@@ -94,6 +97,64 @@ class YoloDetector:
         """
         return self.detect(after_frame)
 
+    def _mask_outside_target_area(self, frame: np.ndarray, center_x: int, center_y: int, outer_radius: int, target_type: str, debug: bool = False) -> np.ndarray:
+        """
+        Mask areas outside the target detection region with white.
+
+        This masks everything outside a square centered on the target to reduce
+        false positives from background artifacts. Works for both pistol and rifle targets.
+
+        Physical dimensions:
+        - Rifle targets: Outer ring 8.7cm, detection square 9.5cm (ratio: 1.092)
+        - Pistol targets: Outer ring 20cm, paper width 21.5cm (ratio: 1.075)
+
+        For both types, we use outer_radius * 2.2 to give some padding beyond the outer ring.
+
+        Args:
+            frame: Input frame
+            center_x, center_y: Target center coordinates
+            outer_radius: Radius of outer ring (detected or estimated by target detector)
+            target_type: 'rifle' or 'pistol' (for debugging)
+            debug: Print debug info
+
+        Returns:
+            Masked frame with areas outside target region set to white
+        """
+        h, w = frame.shape[:2]
+        masked_frame = frame.copy()
+
+        # Calculate detection square size with padding beyond outer ring
+        # Use 2.2x outer radius to give some buffer (about 10% beyond outer ring diameter)
+        detection_square_size = int(outer_radius * 2.2)
+
+        # Make it even for easier centering
+        if detection_square_size % 2 != 0:
+            detection_square_size += 1
+
+        if debug:
+            print(f"      🎯 Masking outside {detection_square_size}x{detection_square_size}px square ({target_type} target, outer_r={outer_radius}px)")
+
+        # Create a mask for the detection area
+        mask = np.zeros((h, w), dtype=np.uint8)
+
+        # Calculate square boundaries centered on target
+        half_size = detection_square_size // 2
+        x1 = max(0, center_x - half_size)
+        y1 = max(0, center_y - half_size)
+        x2 = min(w, center_x + half_size)
+        y2 = min(h, center_y + half_size)
+
+        # Mark detection area in mask
+        mask[y1:y2, x1:x2] = 255
+
+        # Create boolean mask (True = background, False = target area)
+        background_mask = mask == 0
+
+        # Fill background with white
+        masked_frame[background_mask] = [255, 255, 255]
+
+        return masked_frame
+
     def detect(self, frame: np.ndarray, debug: bool = True) -> List[Tuple]:
         """
         Detect bullet holes in a single frame
@@ -108,13 +169,39 @@ class YoloDetector:
         if debug:
             print(f"      🔍 Input frame shape: {frame.shape}")
 
-        # Crop frame to 1944x1944 centered
+        # Crop frame to 1440x1440 centered on target (or frame center if no target detected)
         h, w = frame.shape[:2]
-        crop_size = 1944
+        crop_size = 1440
 
-        # Calculate center crop coordinates
+        # Try to get target center and type from target detector
         center_x = w // 2
         center_y = h // 2
+        target_type = None
+        outer_radius = None
+
+        if self.target_detector and self.target_detector.target_center:
+            # Use detected target center for cropping
+            center_x, center_y = self.target_detector.target_center
+            target_type = self.target_detector.target_type
+
+            # Get outer ring (detected or estimated by target detector)
+            if self.target_detector.outer_circle is not None:
+                _, _, outer_radius = self.target_detector.outer_circle
+
+            if debug:
+                print(f"      🎯 Using target center: ({center_x}, {center_y}), type: {target_type}, outer_r: {outer_radius}")
+        else:
+            if debug:
+                print(f"      📐 Using frame center: ({center_x}, {center_y})")
+
+        # Apply masking (before cropping)
+        # This masks areas outside the target detection zone to reduce false positives
+        # Works for both pistol and rifle targets
+        masked_frame = frame
+        if target_type is not None and outer_radius is not None:
+            masked_frame = self._mask_outside_target_area(frame, center_x, center_y, outer_radius, target_type, debug)
+
+        # Calculate center crop coordinates
         x1_crop = center_x - crop_size // 2
         y1_crop = center_y - crop_size // 2
         x2_crop = x1_crop + crop_size
@@ -126,7 +213,7 @@ class YoloDetector:
         x2_crop = min(w, x2_crop)
         y2_crop = min(h, y2_crop)
 
-        cropped_frame = frame[y1_crop:y2_crop, x1_crop:x2_crop]
+        cropped_frame = masked_frame[y1_crop:y2_crop, x1_crop:x2_crop]
 
         if debug:
             print(f"      🔍 Cropped to: {cropped_frame.shape} (offset: x={x1_crop}, y={y1_crop})")

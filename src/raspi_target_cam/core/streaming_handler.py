@@ -68,6 +68,10 @@ class StreamingHandler(BaseHTTPRequestHandler):
             elif path == '/api/list_camera_presets':
                 presets = self.camera_controller.list_camera_presets()
                 self._send_json_response({'success': True, 'presets': presets})
+            elif path == '/api/list_yolo_models':
+                models = self.camera_controller.list_yolo_models()
+                current_model = self.camera_controller.get_current_yolo_model()
+                self._send_json_response({'success': True, 'models': models, 'current_model': current_model})
             elif path.endswith('.html') or path.endswith('.css') or path.endswith('.js'):
                 self._serve_file(path[1:])  # Remove leading slash
             else:
@@ -548,6 +552,15 @@ class StreamingHandler(BaseHTTPRequestHandler):
 
             elif path == '/api/get_yolo_confidence':
                 response = {'success': True, 'confidence': self.camera_controller.get_yolo_confidence()}
+
+            elif path == '/api/set_yolo_model':
+                model_path = data.get('model_path', '')
+                if model_path:
+                    success, message = self.camera_controller.set_yolo_model(model_path)
+                    current_model = self.camera_controller.get_current_yolo_model()
+                    response = {'success': success, 'message': message, 'current_model': current_model}
+                else:
+                    response = {'success': False, 'message': 'model_path is required'}
 
             elif path == '/api/change_source':
                 source_type = data.get('source_type', '')

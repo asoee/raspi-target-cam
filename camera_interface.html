@@ -649,6 +649,14 @@
                     </div>
 
                     <div class="control-row">
+                        <label>YOLO Model:</label>
+                        <select id="yoloModel" onchange="changeYoloModel()" disabled>
+                            <option value="">Loading...</option>
+                        </select>
+                        <span style="font-size: 0.85em; color: #888;" id="yoloModelInfo"></span>
+                    </div>
+
+                    <div class="control-row">
                         <button onclick="setReferenceFrame()" disabled id="setRefBtn">
                             📋 Set Reference Frame
                         </button>
@@ -727,7 +735,7 @@
         }
 
         function enableControls() {
-            const controls = ['videoSource', 'resolution', 'fpsSlider', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'perspectiveCorrection', 'debugMode', 'debugType', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn', 'detectorType', 'continuousDetection', 'setRefBtn'];
+            const controls = ['videoSource', 'resolution', 'fpsSlider', 'zoom', 'panX', 'panY', 'rotation', 'targetDetection', 'perspectiveCorrection', 'debugMode', 'debugType', 'forceDetectionBtn', 'calibrationMode', 'calibrateBtn', 'saveCalibrationBtn', 'captureBtn', 'recordBtn', 'detectorType', 'continuousDetection', 'yoloModel', 'setRefBtn'];
             controls.forEach(id => {
                 document.getElementById(id).disabled = false;
             });
@@ -1346,6 +1354,9 @@
 
             // Load YOLO confidence threshold
             loadYoloConfidence();
+
+            // Load available YOLO models
+            loadYoloModels();
         }
 
         function toggleContinuousDetection() {
@@ -1372,15 +1383,18 @@
         function updateContinuousDetectionAvailability(detectorType) {
             const checkbox = document.getElementById('continuousDetection');
             const confidenceSlider = document.getElementById('yoloConfidence');
+            const modelSelect = document.getElementById('yoloModel');
 
             if (detectorType === 'yolo') {
                 checkbox.disabled = false;
                 checkbox.title = 'Enable continuous detection on every frame';
                 confidenceSlider.disabled = false;
+                modelSelect.disabled = false;
             } else {
                 checkbox.disabled = true;
                 checkbox.checked = false;
                 checkbox.title = 'Only available with YOLO detector';
+                modelSelect.disabled = true;
                 confidenceSlider.disabled = true;
             }
         }
@@ -1418,6 +1432,88 @@
                     }
                 })
                 .catch(error => console.error('Failed to load YOLO confidence:', error));
+        }
+
+        function loadYoloModels() {
+            console.log('Loading YOLO models...');
+            fetch('/api/list_yolo_models')
+                .then(response => response.json())
+                .then(response => {
+                    console.log('YOLO models response:', response);
+                    if (response.success && response.models) {
+                        const select = document.getElementById('yoloModel');
+                        const infoSpan = document.getElementById('yoloModelInfo');
+
+                        // Clear existing options
+                        select.innerHTML = '';
+
+                        if (response.models.length === 0) {
+                            select.innerHTML = '<option value="">No models found</option>';
+                            infoSpan.textContent = 'No models in data/models/';
+                            console.warn('No YOLO models found');
+                            return;
+                        }
+
+                        console.log(`Found ${response.models.length} YOLO models`);
+
+                        // Add model options
+                        response.models.forEach(model => {
+                            const option = document.createElement('option');
+                            option.value = model.path;
+                            const sizeInMB = (model.size / (1024 * 1024)).toFixed(1);
+                            option.textContent = `${model.name} (${model.type}, ${sizeInMB}MB)`;
+                            select.appendChild(option);
+                        });
+
+                        // Select current model
+                        if (response.current_model) {
+                            console.log('Current model:', response.current_model);
+                            select.value = response.current_model;
+                            // Find the selected model info
+                            const currentModel = response.models.find(m => m.path === response.current_model);
+                            if (currentModel) {
+                                infoSpan.textContent = `Active: ${currentModel.type}`;
+                            }
+                        } else {
+                            console.warn('No current model selected');
+                        }
+                    } else {
+                        console.error('Invalid response from list_yolo_models:', response);
+                    }
+                })
+                .catch(error => {
+                    console.error('Failed to load YOLO models:', error);
+                    const select = document.getElementById('yoloModel');
+                    select.innerHTML = '<option value="">Error loading models</option>';
+                });
+        }
+
+        function changeYoloModel() {
+            const modelPath = document.getElementById('yoloModel').value;
+            const modelName = document.getElementById('yoloModel').options[document.getElementById('yoloModel').selectedIndex].text;
+
+            if (!modelPath) {
+                return;
+            }
+
+            updateStatus(`🔄 Loading YOLO model: ${modelName}...`, false);
+
+            apiCall('/api/set_yolo_model', { model_path: modelPath })
+                .then(response => {
+                    if (response.success) {
+                        updateStatus(`✅ ${response.message}`, false);
+                        const infoSpan = document.getElementById('yoloModelInfo');
+                        infoSpan.textContent = `Active: ${modelName.match(/\(([^,]+),/)[1]}`;
+                    } else {
+                        updateStatus(`❌ ${response.message}`, true);
+                        // Reload models to reset selection
+                        loadYoloModels();
+                    }
+                })
+                .catch(error => {
+                    updateStatus(`❌ Model loading error: ${error}`, true);
+                    loadYoloModels();
+                });
         }
 
         function pausePlayback() {

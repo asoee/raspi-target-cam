@@ -11,7 +11,11 @@
   "pan_x": 0,
   "pan_y": 0,
   "rotation": 270,
-  "target_detection_enabled": false,
+  "target_detection_enabled": true,
   "perspective_correction_enabled": true,
-  "debug_mode": false
+  "debug_mode": false,
+  "detector_type": "yolo",
+  "yolo_conf_threshold": 0.5,
+  "yolo_model_path": "data/models/train21-640_ncnn_model",
+  "continuous_detection": true
 }

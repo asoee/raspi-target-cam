@@ -19,6 +19,7 @@ print("🔍 Faulthandler enabled - will show traceback on segmentation fault")
 print("💡 Send SIGUSR1 signal to dump all thread stacks: kill -USR1 <pid>")
 print(f"🆔 Process ID: {os.getpid()}")
 
+
 def crash_handler(signum, frame):
     """Handle crashes with detailed information"""
     # Prevent recursive crashes
@@ -26,7 +27,7 @@ def crash_handler(signum, frame):
 
     # Simple crash reporting
     try:
-        with open('/tmp/camera_crash.log', 'w') as f:
+        with open("/tmp/camera_crash.log", "w") as f:
             f.write(f"CRASH: Signal {signum}\n")
             faulthandler.dump_traceback(file=f, all_threads=True)
         print(f"\n💥 SEGFAULT DETECTED - Signal {signum}")
@@ -35,6 +36,7 @@ def crash_handler(signum, frame):
         pass  # Don't let crash handler crash
 
     os._exit(1)  # Force exit without cleanup
+
 
 # Register crash handler only for segfault
 signal.signal(signal.SIGSEGV, crash_handler)
@@ -109,7 +111,7 @@ class CameraController:
         self.native_video_fps = None  # Native FPS of video file
 
         # Available sources (detected once at startup)
-        self.available_sources = {'cameras': [], 'videos': []}
+        self.available_sources = {"cameras": [], "videos": []}
 
         # Detect available sources
         self._detect_available_sources()
@@ -134,15 +136,15 @@ class CameraController:
         # Perspective correction for main stream
         self.perspective = Perspective()  # Own perspective correction instance
         self.perspective_correction_enabled = True
-        
+
         # Test frame generation
         self.test_frame_counter = 0
-        
+
         # Bullet hole detection
-        self.detector_type = "traditional"  # "traditional" or "yolo"
+        self.detector_type = "yolo"  # "traditional" or "yolo"
         self.bullet_hole_detector = BulletHoleDetector()
-        self.yolo_detector = None  # Lazy-loaded when first used
-        self.yolo_conf_threshold = 0.7  # Confidence threshold for YOLO (0.0-1.0, higher = fewer false positives)
+        self.yolo_detector = None  # Will be initialized below
+        self.yolo_conf_threshold = 0.5  # Confidence threshold for YOLO (0.0-1.0, higher = fewer false positives)
         self.reference_frame = None  # Store reference frame for bullet hole detection
         self.bullet_holes = []  # Detected bullet holes (stable tracked holes)
         self.continuous_detection = False  # Run detection on every frame (for YOLO)
@@ -153,61 +155,82 @@ class CameraController:
         self.bullet_hole_tracker = BulletHoleTracker(
             match_distance_threshold=30.0,  # Max 30px distance to match holes
             max_frames_missing=5,  # Remove holes after 5 frames without detection
-            min_detections_for_stability=3  # Require 3 detections before showing
+            min_detections_for_stability=3,  # Require 3 detections before showing
         )
+
+        # Track previous target detection state to detect transitions
+        self.previous_target_detected = False
 
         # Camera controls
         self.camera_controls = None  # Will be initialized when camera is opened
-        self.cached_camera_controls = {'available': False, 'controls': {}}  # Cached controls from detection
+        self.cached_camera_controls = {"available": False, "controls": {}}  # Cached controls from detection
 
         # Threaded capture system
         self.capture_system = None
 
+        # Initialize YOLO detector if using YOLO by default
+        if self.detector_type == "yolo":
+            try:
+                print("Initializing YOLO detector...")
+                self.yolo_detector = YoloDetector(
+                    conf_threshold=self.yolo_conf_threshold,
+                    iou_threshold=0.45,
+                    target_class=0,  # bullet_hole class
+                    target_detector=self.target_detector,  # Pass target detector for centered cropping
+                )
+                print("✅ YOLO detector initialized successfully")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize YOLO detector: {e}")
+                print("   Falling back to traditional detector")
+                self.detector_type = "traditional"
+
     def generate_test_frame(self):
         """Generate a static test frame with useful information"""
         import numpy as np
-        
+
         # Create frame with current resolution
         height, width = self.resolution[1], self.resolution[0]
         frame = np.zeros((height, width, 3), dtype=np.uint8)
-        
+
         # Background gradient
         for y in range(height):
             for x in range(width):
                 frame[y, x] = [
-                    int(50 + (x / width) * 100),      # Red gradient
-                    int(30 + (y / height) * 80),      # Green gradient
-                    100                                # Blue constant
+                    int(50 + (x / width) * 100),  # Red gradient
+                    int(30 + (y / height) * 80),  # Green gradient
+                    100,  # Blue constant
                 ]
-        
+
         # Add title
-        cv2.putText(frame, "🎯 Raspberry Pi Target Camera", (50, 80),
-                   cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
-        
+        cv2.putText(frame, "🎯 Raspberry Pi Target Camera", (50, 80), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
+
         # Add digital clock in top-right corner
         from datetime import datetime
+
         current_time = datetime.now()
         time_str = current_time.strftime("%H:%M:%S")
         date_str = current_time.strftime("%Y-%m-%d")
-        
+
         # Clock background
         clock_bg_x = width - 300
         clock_bg_y = 30
         clock_bg_w = 250
         clock_bg_h = 80
-        cv2.rectangle(frame, (clock_bg_x, clock_bg_y), 
-                     (clock_bg_x + clock_bg_w, clock_bg_y + clock_bg_h), 
-                     (0, 0, 0), -1)  # Black background
-        cv2.rectangle(frame, (clock_bg_x, clock_bg_y), 
-                     (clock_bg_x + clock_bg_w, clock_bg_y + clock_bg_h), 
-                     (100, 100, 100), 2)  # Gray border
-        
+        cv2.rectangle(
+            frame, (clock_bg_x, clock_bg_y), (clock_bg_x + clock_bg_w, clock_bg_y + clock_bg_h), (0, 0, 0), -1
+        )  # Black background
+        cv2.rectangle(
+            frame, (clock_bg_x, clock_bg_y), (clock_bg_x + clock_bg_w, clock_bg_y + clock_bg_h), (100, 100, 100), 2
+        )  # Gray border
+
         # Digital time display
-        cv2.putText(frame, time_str, (clock_bg_x + 10, clock_bg_y + 35),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2)  # Green digits
-        cv2.putText(frame, date_str, (clock_bg_x + 10, clock_bg_y + 65),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)  # Gray date
-        
+        cv2.putText(
+            frame, time_str, (clock_bg_x + 10, clock_bg_y + 35), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2
+        )  # Green digits
+        cv2.putText(
+            frame, date_str, (clock_bg_x + 10, clock_bg_y + 65), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1
+        )  # Gray date
+
         # Add status information
         y_pos = 150
         info_lines = [
@@ -220,25 +243,33 @@ class CameraController:
             "",
             f"Available sources:",
             f"• {len(self.available_sources.get('cameras', []))} camera(s) detected",
-            f"• {len(self.available_sources.get('videos', []))} video file(s) available"
+            f"• {len(self.available_sources.get('videos', []))} video file(s) available",
         ]
-        
+
         for line in info_lines:
-            cv2.putText(frame, line, (50, y_pos),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.putText(frame, line, (50, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             y_pos += 40
-        
+
         # Add timestamp
         from datetime import datetime
+
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cv2.putText(frame, f"Generated: {timestamp}", (50, height - 50),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
-        
+        cv2.putText(
+            frame, f"Generated: {timestamp}", (50, height - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1
+        )
+
         # Add frame counter (to show it's "live")
         self.test_frame_counter += 1
-        cv2.putText(frame, f"Frame: {self.test_frame_counter}", (width - 200, height - 50),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
-        
+        cv2.putText(
+            frame,
+            f"Frame: {self.test_frame_counter}",
+            (width - 200, height - 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (200, 200, 200),
+            1,
+        )
+
         # Add some visual elements
         # Corner markers
         corner_size = 50
@@ -246,12 +277,12 @@ class CameraController:
         cv2.rectangle(frame, (width - corner_size, 0), (width, corner_size), (0, 255, 0), 3)
         cv2.rectangle(frame, (0, height - corner_size), (corner_size, height), (0, 255, 0), 3)
         cv2.rectangle(frame, (width - corner_size, height - corner_size), (width, height), (0, 255, 0), 3)
-        
+
         # Center crosshair
         center_x, center_y = width // 2, height // 2
         cv2.line(frame, (center_x - 50, center_y), (center_x + 50, center_y), (255, 0, 0), 2)
         cv2.line(frame, (center_x, center_y - 50), (center_x, center_y + 50), (255, 0, 0), 2)
-        
+
         return frame
 
     def start_capture(self):
@@ -268,24 +299,32 @@ class CameraController:
 
             elif self.source_type == "camera":
                 print(f"DEBUG: Opening camera {self.camera_index}...")
-                
+
                 # Use timeout mechanism to prevent hanging
                 try:
                     self.cap = cv2.VideoCapture(self.camera_index)
-                    
+
                     # Check if opened within a reasonable time
                     if not self.cap or not self.cap.isOpened():
                         if self.cap:
                             self.cap.release()
                         raise RuntimeError(f"Could not open camera {self.camera_index}")
-                    
+
                     print(f"DEBUG: Camera {self.camera_index} opened successfully")
 
                     # Set anti-flicker to 50Hz using v4l2-ctl
                     try:
                         result = subprocess.run(
-                            ['v4l2-ctl', '-d', f'/dev/video{self.camera_index}', '--set-ctrl', 'power_line_frequency=1'],
-                            capture_output=True, text=True, timeout=2
+                            [
+                                "v4l2-ctl",
+                                "-d",
+                                f"/dev/video{self.camera_index}",
+                                "--set-ctrl",
+                                "power_line_frequency=1",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=2,
                         )
                         if result.returncode == 0:
                             print(f"DEBUG: Anti-flicker set to 50Hz")
@@ -325,23 +364,25 @@ class CameraController:
 
                         # Find the camera in available sources to get cached controls
                         camera_source = None
-                        for camera in self.available_sources.get('cameras', []):
-                            if camera['index'] == self.camera_index:
+                        for camera in self.available_sources.get("cameras", []):
+                            if camera["index"] == self.camera_index:
                                 camera_source = camera
                                 break
 
-                        if camera_source and camera_source.get('controls', {}).get('available'):
+                        if camera_source and camera_source.get("controls", {}).get("available"):
                             # Use cached control information
-                            self.cached_camera_controls = camera_source['controls']
-                            print(f"DEBUG: Using cached controls - {len(self.cached_camera_controls['controls'])} controls available")
+                            self.cached_camera_controls = camera_source["controls"]
+                            print(
+                                f"DEBUG: Using cached controls - {len(self.cached_camera_controls['controls'])} controls available"
+                            )
                         else:
-                            self.cached_camera_controls = {'available': False, 'controls': {}}
+                            self.cached_camera_controls = {"available": False, "controls": {}}
                             print(f"DEBUG: No cached controls available for camera {self.camera_index}")
 
                     except Exception as e:
                         print(f"WARNING: Could not load cached camera controls: {e}")
-                        self.cached_camera_controls = {'available': False, 'controls': {}}
-                        
+                        self.cached_camera_controls = {"available": False, "controls": {}}
+
                 except Exception as e:
                     print(f"ERROR: Failed to initialize camera {self.camera_index}: {e}")
                     if self.cap:
@@ -402,7 +443,7 @@ class CameraController:
                 source_type=self.source_type,
                 camera_index=self.camera_index,
                 buffer_size=self.buffer_size,
-                test_frame_generator=test_gen
+                test_frame_generator=test_gen,
             )
             self.capture_system.start()
 
@@ -426,16 +467,20 @@ class CameraController:
                 if self.capture_system:
                     raw_frame, position = self.capture_system.get_latest_frame()
                 else:
-                    raw_frame, position = None, {'current_frame': 0, 'total_frames': 0, 'source_type': 'unknown', 'change_counter': 0}
+                    raw_frame, position = (
+                        None,
+                        {"current_frame": 0, "total_frames": 0, "source_type": "unknown", "change_counter": 0},
+                    )
 
                 if raw_frame is not None:
-                    change_counter = position.get('change_counter', 0)
+                    change_counter = position.get("change_counter", 0)
+                    # print(f"processing frame {change_counter}")
 
                     # Skip processing if it's the same frame as last time
                     # Use change_counter which works for all source types (camera, video, test)
                     if change_counter == last_processed_change_counter:
                         # Frame hasn't changed, skip processing
-                        time.sleep(0.01)
+                        time.sleep(0.10)
                         continue
 
                     # Update last processed change counter
@@ -445,24 +490,43 @@ class CameraController:
                     # Note: _apply_transformations stores the rotated frame as self.raw_frame
                     corrected_frame = self._apply_transformations(raw_frame)
 
-                    # Step 2: Run continuous detection if enabled (on corrected frame, before zoom/pan)
-                    # IMPORTANT: Detection runs on perspective-corrected frame, not zoomed/panned view
-                    if self.continuous_detection and self.detector_type == "yolo":
+                    # Step 2: Run target detection (circle detection) if enabled
+                    # This detects the target itself and determines target type (pistol/rifle)
+                    target_detected = False
+                    if self.target_detector.detection_enabled:
+                        self.target_detector.detect_target(corrected_frame)
+                        # Check if target is detected (even if not stable yet)
+                        target_detected = self.target_detector.target_center is not None
+
+                    # Clear bullet holes when target transitions from detected to not detected
+                    if self.previous_target_detected and not target_detected:
+                        print("Target lost - clearing bullet holes")
+                        self.clear_bullet_holes()
+
+                    # Update previous target state
+                    self.previous_target_detected = target_detected
+
+                    # Step 3: Run continuous bullet hole detection if enabled (on corrected frame, before zoom/pan)
+                    # IMPORTANT: Only run if target is detected, and detection runs on perspective-corrected frame
+                    if target_detected and self.continuous_detection and self.detector_type == "yolo":
                         self.frame_count += 1
                         # Check if we should run detection on this frame
                         if self.frame_count > self.detection_interval:
                             self.frame_count = 0
                             self._run_continuous_detection(corrected_frame)
 
-                    # Step 3: Add bullet hole overlays (on corrected frame, before zoom/pan)
+                    # Step 4: Add bullet hole overlays (on corrected frame, before zoom/pan)
                     display_frame = corrected_frame
                     if self.bullet_holes:
                         display_frame = self.bullet_hole_detector.draw_bullet_hole_overlays(
                             corrected_frame, self.bullet_holes
                         )
 
-                    # Step 4: Apply display transformations (zoom/pan) for UI
+                    # Step 5: Apply display transformations (zoom/pan) for UI
                     display_frame = self._apply_display_transformations(display_frame)
+
+                    # Step 6: Add HUD overlay
+                    display_frame = self._draw_hud_overlay(display_frame)
 
                     # Update display frame (thread-safe)
                     with self.lock:
@@ -470,8 +534,8 @@ class CameraController:
 
                     # Update playback position for video files
                     if self.source_type == "video":
-                        self.current_frame_number = position['current_frame']
-                        self.total_frames = position['total_frames']
+                        self.current_frame_number = position["current_frame"]
+                        self.total_frames = position["total_frames"]
                         if not self.paused:
                             self.display_frame_number = self.current_frame_number
 
@@ -481,6 +545,7 @@ class CameraController:
             except Exception as e:
                 print(f"ERROR in _processing_loop: {e}")
                 import traceback
+
                 traceback.print_exc()
                 time.sleep(0.1)
 
@@ -566,6 +631,69 @@ class CameraController:
 
         return frame
 
+    def _draw_hud_overlay(self, frame):
+        """Draw HUD overlay on the frame showing target information
+
+        Args:
+            frame: Input frame
+
+        Returns:
+            Frame with HUD overlay
+        """
+        if not self._is_valid_frame(frame):
+            return frame
+
+        # Create a copy to avoid modifying the original
+        overlay_frame = frame.copy()
+        h, w = overlay_frame.shape[:2]
+
+        # Get target type from target detector (using the old attributes for compatibility)
+        target_type = self.target_detector.target_type
+        is_stable = self.target_detector.stable_detection is not None
+        confidence = self.target_detector.detection_confidence
+
+        # Prepare text and color based on detection state
+        if target_type:
+            text = f"Target: {target_type.upper()}"
+            if is_stable:
+                text_color = (0, 255, 0)  # Green for stable detection
+            else:
+                text_color = (0, 255, 255)  # Yellow for unstable detection
+                text += " (detecting...)"
+        else:
+            text = "No Target"
+            text_color = (100, 100, 100)  # Gray for no target
+
+        # Text settings
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.0
+        font_thickness = 2
+
+        # Get text size for centering
+        (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, font_thickness)
+
+        # Calculate centered position at top
+        text_x = (w - text_width) // 2
+        text_y = 50 + text_height  # 50px from top
+
+        # Draw semi-transparent background rectangle for better readability
+        padding = 10
+        bg_x1 = text_x - padding
+        bg_y1 = text_y - text_height - padding
+        bg_x2 = text_x + text_width + padding
+        bg_y2 = text_y + baseline + padding
+
+        # Create semi-transparent overlay
+        overlay = overlay_frame.copy()
+        cv2.rectangle(overlay, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+        alpha = 0.6  # Transparency
+        cv2.addWeighted(overlay, alpha, overlay_frame, 1 - alpha, 0, overlay_frame)
+
+        # Draw text
+        cv2.putText(overlay_frame, text, (text_x, text_y), font, font_scale, text_color, font_thickness)
+
+        return overlay_frame
+
     def _rotate_frame(self, frame, degrees):
         """Rotate frame by specified degrees clockwise"""
         # Validate input frame
@@ -606,7 +734,7 @@ class CameraController:
         """Validate frame for OpenCV operations"""
         if frame is None:
             return False
-        if not hasattr(frame, 'shape') or not hasattr(frame, 'dtype'):
+        if not hasattr(frame, "shape") or not hasattr(frame, "dtype"):
             return False
         if len(frame.shape) not in [2, 3]:  # Grayscale or color
             return False
@@ -637,7 +765,7 @@ class CameraController:
                         return None
 
                     # Additional safety checks for corrupted data
-                    if not hasattr(self.frame, 'shape') or not hasattr(self.frame, 'dtype'):
+                    if not hasattr(self.frame, "shape") or not hasattr(self.frame, "dtype"):
                         print(f"WARNING: Frame missing attributes, skipping encode")
                         return None
 
@@ -651,11 +779,11 @@ class CameraController:
                     frame_copy = self.frame.copy()
 
                     # Ensure proper data type and layout
-                    if frame_copy.dtype != 'uint8':
-                        frame_copy = frame_copy.astype('uint8')
+                    if frame_copy.dtype != "uint8":
+                        frame_copy = frame_copy.astype("uint8")
 
                     # Ensure contiguous memory layout
-                    if not frame_copy.flags['C_CONTIGUOUS']:
+                    if not frame_copy.flags["C_CONTIGUOUS"]:
                         frame_copy = frame_copy.copy()
 
                     # Extra validation before imencode
@@ -665,7 +793,7 @@ class CameraController:
 
                     try:
                         # Try to encode - catch FFmpeg decoder errors
-                        _, buffer = cv2.imencode('.jpg', frame_copy, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        _, buffer = cv2.imencode(".jpg", frame_copy, [cv2.IMWRITE_JPEG_QUALITY, 85])
                         return buffer.tobytes()
                     except cv2.error as e:
                         print(f"WARNING: OpenCV error during JPEG encoding: {e}")
@@ -678,6 +806,7 @@ class CameraController:
         except Exception as e:
             print(f"ERROR in get_frame_jpeg: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -787,7 +916,7 @@ class CameraController:
         if success:
             # Update display frame number
             pos = self.capture_system.get_playback_position()
-            self.display_frame_number = pos['current_frame']
+            self.display_frame_number = pos["current_frame"]
             print(f"DEBUG: Step forward to frame {self.display_frame_number}")
         return success
 
@@ -803,7 +932,7 @@ class CameraController:
         if success:
             # Update display frame number
             pos = self.capture_system.get_playback_position()
-            self.display_frame_number = pos['current_frame']
+            self.display_frame_number = pos["current_frame"]
             print(f"DEBUG: Step backward to frame {self.display_frame_number}")
         return success
 
@@ -819,7 +948,7 @@ class CameraController:
         if success:
             # Update display frame number
             pos = self.capture_system.get_playback_position()
-            self.display_frame_number = pos['current_frame']
+            self.display_frame_number = pos["current_frame"]
             print(f"DEBUG: Step forward {seconds}s to frame {self.display_frame_number}")
         return success
 
@@ -835,7 +964,7 @@ class CameraController:
         if success:
             # Update display frame number
             pos = self.capture_system.get_playback_position()
-            self.display_frame_number = pos['current_frame']
+            self.display_frame_number = pos["current_frame"]
             print(f"DEBUG: Step backward {seconds}s to frame {self.display_frame_number}")
         return success
 
@@ -862,8 +991,8 @@ class CameraController:
             # Update frame counters
             time.sleep(0.2)  # Give time for seek to complete
             pos = self.capture_system.get_playback_position()
-            self.current_frame_number = pos['current_frame']
-            self.display_frame_number = pos['current_frame']
+            self.current_frame_number = pos["current_frame"]
+            self.display_frame_number = pos["current_frame"]
             print(f"DEBUG: Seeked to frame {self.current_frame_number}")
             return True, f"Seeked to frame {self.current_frame_number}"
         else:
@@ -876,17 +1005,17 @@ class CameraController:
     def get_playback_info(self):
         """Get current playback information"""
         return {
-            'paused': self.paused,
-            'current_frame': self.display_frame_number,  # Use display frame number instead
-            'total_frames': self.total_frames,
-            'buffer_size': len(self.frame_buffer),
-            'pause_buffer_index': self.pause_buffer_index if self.paused else None,
-            'can_step_backward': self.paused and self.display_frame_number > 0,
-            'can_step_forward': self.paused and self.display_frame_number < self.total_frames - 1,
-            'supports_playback_controls': self.source_type == "video"
+            "paused": self.paused,
+            "current_frame": self.display_frame_number,  # Use display frame number instead
+            "total_frames": self.total_frames,
+            "buffer_size": len(self.frame_buffer),
+            "pause_buffer_index": self.pause_buffer_index if self.paused else None,
+            "can_step_backward": self.paused and self.display_frame_number > 0,
+            "can_step_forward": self.paused and self.display_frame_number < self.total_frames - 1,
+            "supports_playback_controls": self.source_type == "video",
         }
 
-    def get_debug_frame_jpeg(self, debug_type='combined'):
+    def get_debug_frame_jpeg(self, debug_type="combined"):
         """Get debug frame as JPEG bytes for specific debug type
 
         Args:
@@ -898,7 +1027,7 @@ class CameraController:
                 self.target_detector.generate_debug_frame(self.frame)
 
                 # For corrected debug type, provide the perspective-corrected frame
-                if debug_type == 'corrected' and self.perspective_correction_enabled:
+                if debug_type == "corrected" and self.perspective_correction_enabled:
                     # Fallback to generic perspective correction
                     corrected_frame = self.perspective.apply_perspective_correction(self.frame)
                     if corrected_frame is not None:
@@ -910,16 +1039,16 @@ class CameraController:
     def _get_camera_controls_metadata(self):
         """Get current camera controls as metadata dictionary"""
         source_info = {}
-        if self.source_type == 'video':
-            source_info['video_file'] = self.video_file or 'unknown'
-        elif self.source_type == 'camera':
-            source_info['camera_index'] = self.camera_index
+        if self.source_type == "video":
+            source_info["video_file"] = self.video_file or "unknown"
+        elif self.source_type == "camera":
+            source_info["camera_index"] = self.camera_index
 
         settings = {
-            'resolution': self.resolution,
-            'zoom': self.zoom,
-            'rotation': self.rotation,
-            'perspective_correction': self.perspective_correction_enabled
+            "resolution": self.resolution,
+            "zoom": self.zoom,
+            "rotation": self.rotation,
+            "perspective_correction": self.perspective_correction_enabled,
         }
 
         return MetadataHandler.get_camera_controls_metadata(
@@ -958,9 +1087,13 @@ class CameraController:
                 self.bullet_holes = []  # Clear previous detections
                 return True
         return False
-    
+
     def detect_bullet_holes(self):
         """Detect bullet holes by comparing current frame with reference"""
+        # Check if target is detected first
+        if self.target_detector.target_center is None:
+            return False, "No target detected. Please ensure a target is visible in the frame."
+
         if self.reference_frame is None and self.detector_type == "traditional":
             return False, "No reference frame set"
 
@@ -979,12 +1112,11 @@ class CameraController:
 
                     # YOLO detector works on single frame (doesn't need reference)
                     holes = self.yolo_detector.detect_bullet_holes(
-                        self.reference_frame if self.reference_frame is not None else self.frame,
-                        self.frame)
+                        self.reference_frame if self.reference_frame is not None else self.frame, self.frame
+                    )
                 else:
                     # Traditional detector needs reference frame
-                    holes = self.bullet_hole_detector.detect_bullet_holes(
-                        self.reference_frame, self.frame)
+                    holes = self.bullet_hole_detector.detect_bullet_holes(self.reference_frame, self.frame)
 
                 # Store detected holes and cache in detector for overlay
                 self.bullet_holes = holes
@@ -993,7 +1125,7 @@ class CameraController:
                 return True, f"Found {len(holes)} bullet hole(s) using {self.detector_type} detector"
 
         return False, "No current frame available"
-    
+
     def clear_bullet_holes(self):
         """Clear all detected bullet holes"""
         self.bullet_holes = []
@@ -1012,7 +1144,9 @@ class CameraController:
         if detector_type == "yolo" and self.yolo_detector is None:
             try:
                 print(f"Pre-loading YOLO detector with confidence threshold {self.yolo_conf_threshold}...")
-                self.yolo_detector = YoloDetector(conf_threshold=self.yolo_conf_threshold, target_class=0)
+                self.yolo_detector = YoloDetector(
+                    conf_threshold=self.yolo_conf_threshold, target_class=0, target_detector=self.target_detector
+                )
                 print("YOLO detector loaded successfully")
             except Exception as e:
                 return False, f"Failed to load YOLO detector: {e}"
@@ -1023,6 +1157,68 @@ class CameraController:
         """Get current detector type"""
         return self.detector_type
 
+    def list_yolo_models(self):
+        """List all available YOLO models in data/models/ directory"""
+        from pathlib import Path
+
+        models_dir = Path("./data/models")
+        if not models_dir.exists():
+            return []
+
+        models = []
+
+        # Find .pt files
+        for pt_file in models_dir.glob("*.pt"):
+            models.append(
+                {"name": pt_file.name, "path": str(pt_file), "type": "PyTorch", "size": pt_file.stat().st_size}
+            )
+
+        # Find NCNN model directories (contain .param and .bin files)
+        for model_dir in models_dir.iterdir():
+            if model_dir.is_dir():
+                param_files = list(model_dir.glob("*.param"))
+                bin_files = list(model_dir.glob("*.bin"))
+                if param_files and bin_files:
+                    # Calculate total size of all files in directory
+                    total_size = sum(f.stat().st_size for f in model_dir.rglob("*") if f.is_file())
+                    models.append({"name": model_dir.name, "path": str(model_dir), "type": "NCNN", "size": total_size})
+
+        # Sort by name
+        models.sort(key=lambda x: x["name"])
+
+        return models
+
+    def get_current_yolo_model(self):
+        """Get the currently loaded YOLO model path"""
+        if self.yolo_detector:
+            return str(self.yolo_detector.model_path)
+        return None
+
+    def set_yolo_model(self, model_path):
+        """Set/load a specific YOLO model"""
+        from pathlib import Path
+
+        # Validate model path exists
+        model_path = Path(model_path)
+        if not model_path.exists():
+            return False, f"Model not found: {model_path}"
+
+        try:
+            print(f"Loading YOLO model: {model_path}")
+            # Create new detector with the specified model
+            self.yolo_detector = YoloDetector(
+                model_path=str(model_path),
+                conf_threshold=self.yolo_conf_threshold,
+                iou_threshold=0.45,
+                target_class=0,
+                target_detector=self.target_detector,
+            )
+            print(f"✅ Successfully loaded YOLO model: {model_path.name}")
+            return True, f"Loaded model: {model_path.name}"
+        except Exception as e:
+            print(f"❌ Failed to load YOLO model: {e}")
+            return False, f"Failed to load model: {str(e)}"
+
     def set_continuous_detection(self, enabled):
         """Enable or disable continuous detection (runs on every frame)"""
         self.continuous_detection = enabled
@@ -1030,8 +1226,12 @@ class CameraController:
             # Pre-load YOLO detector
             if self.yolo_detector is None:
                 try:
-                    print(f"Pre-loading YOLO detector for continuous detection with confidence threshold {self.yolo_conf_threshold}...")
-                    self.yolo_detector = YoloDetector(conf_threshold=self.yolo_conf_threshold, target_class=0)
+                    print(
+                        f"Pre-loading YOLO detector for continuous detection with confidence threshold {self.yolo_conf_threshold}..."
+                    )
+                    self.yolo_detector = YoloDetector(
+                        conf_threshold=self.yolo_conf_threshold, target_class=0, target_detector=self.target_detector
+                    )
                     print("YOLO detector loaded successfully")
                 except Exception as e:
                     return False, f"Failed to load YOLO detector: {e}"
@@ -1083,8 +1283,8 @@ class CameraController:
 
         except Exception as e:
             print(f"Error in continuous detection: {e}")
-    
-    def get_bullet_hole_debug_frame(self, frame_type='combined'):
+
+    def get_bullet_hole_debug_frame(self, frame_type="combined"):
         """Get bullet hole detection debug frame"""
         return self.bullet_hole_detector.get_debug_frame(frame_type)
 
@@ -1117,11 +1317,7 @@ class CameraController:
         metadata = self._get_camera_controls_metadata()
 
         # Start recording using threaded system (handles codec fallback automatically)
-        success, message, actual_filepath = self.capture_system.start_recording(
-            filepath,
-            fps=fps,
-            metadata=metadata
-        )
+        success, message, actual_filepath = self.capture_system.start_recording(filepath, fps=fps, metadata=metadata)
 
         if success:
             self.recording = True
@@ -1169,35 +1365,27 @@ class CameraController:
     def get_recording_status(self):
         """Get current recording status"""
         if not self.recording:
-            return {
-                'recording': False,
-                'filename': None,
-                'duration': 0
-            }
+            return {"recording": False, "filename": None, "duration": 0}
 
         duration = 0
         if self.recording_start_time:
             duration = (datetime.now() - self.recording_start_time).total_seconds()
 
-        return {
-            'recording': True,
-            'filename': self.recording_filename,
-            'duration': duration
-        }
+        return {"recording": True, "filename": self.recording_filename, "duration": duration}
 
     def get_camera_controls(self):
         """Get available camera controls from cached data"""
         return {
-            'available': self.cached_camera_controls.get('available', False),
-            'controls': self.cached_camera_controls.get('controls', {})
+            "available": self.cached_camera_controls.get("available", False),
+            "controls": self.cached_camera_controls.get("controls", {}),
         }
 
     def set_camera_control(self, name, value):
         """Set a camera control value using the existing camera instance"""
-        if not self.cached_camera_controls.get('available'):
+        if not self.cached_camera_controls.get("available"):
             return False, "Camera controls not available"
 
-        if name not in self.cached_camera_controls.get('controls', {}):
+        if name not in self.cached_camera_controls.get("controls", {}):
             return False, f"Control '{name}' not available"
 
         if not self.cap or not self.cap.isOpened():
@@ -1206,28 +1394,28 @@ class CameraController:
         try:
             # Map control names to OpenCV property IDs
             control_mapping = {
-                'brightness': cv2.CAP_PROP_BRIGHTNESS,
-                'contrast': cv2.CAP_PROP_CONTRAST,
-                'saturation': cv2.CAP_PROP_SATURATION,
-                'hue': cv2.CAP_PROP_HUE,
-                'gain': cv2.CAP_PROP_GAIN,
-                'gamma': cv2.CAP_PROP_GAMMA,
-                'exposure': cv2.CAP_PROP_EXPOSURE,
-                'auto_exposure': cv2.CAP_PROP_AUTO_EXPOSURE,
-                'auto_wb': cv2.CAP_PROP_AUTO_WB,
-                'backlight': cv2.CAP_PROP_BACKLIGHT,
-                'sharpness': cv2.CAP_PROP_SHARPNESS,
-                'temperature': cv2.CAP_PROP_TEMPERATURE,
-                'wb_temperature': cv2.CAP_PROP_WB_TEMPERATURE,
+                "brightness": cv2.CAP_PROP_BRIGHTNESS,
+                "contrast": cv2.CAP_PROP_CONTRAST,
+                "saturation": cv2.CAP_PROP_SATURATION,
+                "hue": cv2.CAP_PROP_HUE,
+                "gain": cv2.CAP_PROP_GAIN,
+                "gamma": cv2.CAP_PROP_GAMMA,
+                "exposure": cv2.CAP_PROP_EXPOSURE,
+                "auto_exposure": cv2.CAP_PROP_AUTO_EXPOSURE,
+                "auto_wb": cv2.CAP_PROP_AUTO_WB,
+                "backlight": cv2.CAP_PROP_BACKLIGHT,
+                "sharpness": cv2.CAP_PROP_SHARPNESS,
+                "temperature": cv2.CAP_PROP_TEMPERATURE,
+                "wb_temperature": cv2.CAP_PROP_WB_TEMPERATURE,
             }
 
             if name not in control_mapping:
                 return False, f"Control '{name}' not supported for direct setting"
 
             # Validate value against cached range
-            control_info = self.cached_camera_controls['controls'][name]
-            min_val = control_info.get('min')
-            max_val = control_info.get('max')
+            control_info = self.cached_camera_controls["controls"][name]
+            min_val = control_info.get("min")
+            max_val = control_info.get("max")
 
             if min_val is not None and max_val is not None:
                 if value < min_val or value > max_val:
@@ -1242,7 +1430,7 @@ class CameraController:
                 actual_value = self.cap.get(prop_id)
 
                 # Update cached value
-                self.cached_camera_controls['controls'][name]['current'] = actual_value
+                self.cached_camera_controls["controls"][name]["current"] = actual_value
 
                 return True, f"Set {name} to {actual_value}"
             else:
@@ -1253,17 +1441,17 @@ class CameraController:
 
     def get_camera_control(self, name):
         """Get current value of a camera control from cached data"""
-        if not self.cached_camera_controls.get('available'):
+        if not self.cached_camera_controls.get("available"):
             return None
 
-        if name not in self.cached_camera_controls.get('controls', {}):
+        if name not in self.cached_camera_controls.get("controls", {}):
             return None
 
-        return self.cached_camera_controls['controls'][name].get('current')
+        return self.cached_camera_controls["controls"][name].get("current")
 
     def reset_camera_controls(self):
         """Reset all camera controls to defaults using existing camera instance"""
-        if not self.cached_camera_controls.get('available'):
+        if not self.cached_camera_controls.get("available"):
             return False, "Camera controls not available"
 
         if not self.cap or not self.cap.isOpened():
@@ -1274,8 +1462,8 @@ class CameraController:
             total_count = 0
 
             # Reset each control that has a default value
-            for name, control_info in self.cached_camera_controls['controls'].items():
-                default_val = control_info.get('default')
+            for name, control_info in self.cached_camera_controls["controls"].items():
+                default_val = control_info.get("default")
                 if default_val is not None:
                     total_count += 1
                     success, message = self.set_camera_control(name, default_val)
@@ -1297,9 +1485,9 @@ class CameraController:
 
             # Map format name to OpenCV fourcc code
             format_mapping = {
-                'MJPG': cv2.VideoWriter_fourcc(*'MJPG'),
-                'YUYV': cv2.VideoWriter_fourcc(*'YUYV'),
-                'YUY2': cv2.VideoWriter_fourcc(*'YUY2'),
+                "MJPG": cv2.VideoWriter_fourcc(*"MJPG"),
+                "YUYV": cv2.VideoWriter_fourcc(*"YUYV"),
+                "YUY2": cv2.VideoWriter_fourcc(*"YUY2"),
             }
 
             fourcc_code = format_mapping.get(format_name.upper())
@@ -1323,7 +1511,9 @@ class CameraController:
             actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
 
-            print(f"DEBUG: Resolution set result - Width: {width_success}, Height: {height_success}, FPS: {fps_success}")
+            print(
+                f"DEBUG: Resolution set result - Width: {width_success}, Height: {height_success}, FPS: {fps_success}"
+            )
             print(f"DEBUG: Actual values - {actual_width}x{actual_height} @ {actual_fps}fps")
 
             if actual_width == width and actual_height == height:
@@ -1332,26 +1522,29 @@ class CameraController:
                     message += f" (requested {fps}fps)"
                 return True, message
             else:
-                return False, f"Resolution change failed - got {actual_width}x{actual_height}, expected {width}x{height}"
+                return (
+                    False,
+                    f"Resolution change failed - got {actual_width}x{actual_height}, expected {width}x{height}",
+                )
 
         except Exception as e:
             return False, f"Error setting resolution: {str(e)}"
 
     def save_camera_preset(self, preset_name):
         """Save current camera control settings as a preset"""
-        if not self.cached_camera_controls.get('available'):
+        if not self.cached_camera_controls.get("available"):
             return False, "Camera controls not available"
 
         try:
             # Create preset from cached current values
             preset = {}
-            for name, control_info in self.cached_camera_controls['controls'].items():
-                preset[name] = control_info.get('current')
+            for name, control_info in self.cached_camera_controls["controls"].items():
+                preset[name] = control_info.get("current")
 
             # Save to file for persistence
             preset_file = f"./data/presets/{preset_name}.json"
             os.makedirs("./data/presets", exist_ok=True)
-            with open(preset_file, 'w') as f:
+            with open(preset_file, "w") as f:
                 json.dump(preset, f, indent=2)
             return True, f"Saved preset '{preset_name}' with {len(preset)} controls"
         except Exception as e:
@@ -1359,7 +1552,7 @@ class CameraController:
 
     def load_camera_preset(self, preset_name):
         """Load camera control settings from a preset using existing camera instance"""
-        if not self.cached_camera_controls.get('available'):
+        if not self.cached_camera_controls.get("available"):
             return False, "Camera controls not available"
 
         if not self.cap or not self.cap.isOpened():
@@ -1370,7 +1563,7 @@ class CameraController:
             if not os.path.exists(preset_file):
                 return False, f"Preset '{preset_name}' not found"
 
-            with open(preset_file, 'r') as f:
+            with open(preset_file, "r") as f:
                 preset = json.load(f)
 
             # Apply preset using existing camera instance
@@ -1378,7 +1571,7 @@ class CameraController:
             total_count = 0
 
             for name, value in preset.items():
-                if name in self.cached_camera_controls['controls']:
+                if name in self.cached_camera_controls["controls"]:
                     total_count += 1
                     success, message = self.set_camera_control(name, value)
                     if success:
@@ -1398,7 +1591,7 @@ class CameraController:
 
             presets = []
             for filename in os.listdir(presets_dir):
-                if filename.endswith('.json'):
+                if filename.endswith(".json"):
                     preset_name = filename[:-5]  # Remove .json extension
                     presets.append(preset_name)
             return presets
@@ -1411,30 +1604,34 @@ class CameraController:
         try:
             # Build defaults dictionary with all camera settings
             defaults = {
-                'source_type': self.source_type,
-                'camera_index': self.camera_index if self.source_type == 'camera' else None,
-                'video_file': self.video_file if self.source_type == 'video' else None,
-                'resolution': list(self.resolution),
-                'camera_fps': self.camera_fps,
-                'zoom': self.zoom,
-                'pan_x': self.pan_x,
-                'pan_y': self.pan_y,
-                'rotation': self.rotation,
-                'target_detection_enabled': self.target_detector.detection_enabled,
-                'perspective_correction_enabled': self.perspective_correction_enabled,
-                'debug_mode': self.target_detector.debug_mode,
+                "source_type": self.source_type,
+                "camera_index": self.camera_index if self.source_type == "camera" else None,
+                "video_file": self.video_file if self.source_type == "video" else None,
+                "resolution": list(self.resolution),
+                "camera_fps": self.camera_fps,
+                "zoom": self.zoom,
+                "pan_x": self.pan_x,
+                "pan_y": self.pan_y,
+                "rotation": self.rotation,
+                "target_detection_enabled": self.target_detector.detection_enabled,
+                "perspective_correction_enabled": self.perspective_correction_enabled,
+                "debug_mode": self.target_detector.debug_mode,
+                "detector_type": self.detector_type,
+                "yolo_conf_threshold": self.yolo_conf_threshold,
+                "yolo_model_path": self.get_current_yolo_model(),
+                "continuous_detection": self.continuous_detection,
             }
 
             # Add V4L2 camera controls if available
-            if self.cached_camera_controls.get('available'):
+            if self.cached_camera_controls.get("available"):
                 camera_controls = {}
-                for name, control_info in self.cached_camera_controls['controls'].items():
-                    camera_controls[name] = control_info.get('current')
-                defaults['camera_controls'] = camera_controls
+                for name, control_info in self.cached_camera_controls["controls"].items():
+                    camera_controls[name] = control_info.get("current")
+                defaults["camera_controls"] = camera_controls
 
             # Save to defaults.json file
             defaults_file = "./defaults.json"
-            with open(defaults_file, 'w') as f:
+            with open(defaults_file, "w") as f:
                 json.dump(defaults, f, indent=2)
 
             print(f"Saved camera settings to {defaults_file}")
@@ -1451,88 +1648,104 @@ class CameraController:
                 print(f"No defaults file found at {defaults_file}")
                 return False, "No defaults file found"
 
-            with open(defaults_file, 'r') as f:
+            with open(defaults_file, "r") as f:
                 defaults = json.load(f)
 
             print(f"Loading defaults from {defaults_file}")
 
             # Apply video source first if different from current
-            if 'source_type' in defaults:
-                source_type = defaults['source_type']
-                if source_type == 'camera' and defaults.get('camera_index') is not None:
-                    camera_index = defaults['camera_index']
-                    if self.source_type != 'camera' or self.camera_index != camera_index:
+            if "source_type" in defaults:
+                source_type = defaults["source_type"]
+                if source_type == "camera" and defaults.get("camera_index") is not None:
+                    camera_index = defaults["camera_index"]
+                    if self.source_type != "camera" or self.camera_index != camera_index:
                         print(f"  Switching to camera {camera_index}")
                         # Format: set_video_source expects string camera index
-                        success, message = self.set_video_source('camera', str(camera_index))
+                        success, message = self.set_video_source("camera", str(camera_index))
                         if not success:
                             print(f"  WARNING: Failed to switch to camera: {message}")
-                elif source_type == 'video' and defaults.get('video_file'):
-                    video_file = defaults['video_file']
-                    if self.source_type != 'video' or self.video_file != video_file:
+                elif source_type == "video" and defaults.get("video_file"):
+                    video_file = defaults["video_file"]
+                    if self.source_type != "video" or self.video_file != video_file:
                         print(f"  Switching to video file: {video_file}")
                         # Extract just the filename from the path
                         filename = os.path.basename(video_file)
-                        success, message = self.set_video_source('video', filename)
+                        success, message = self.set_video_source("video", filename)
                         if not success:
                             print(f"  WARNING: Failed to switch to video: {message}")
-                elif source_type == 'test':
-                    if self.source_type != 'test':
+                elif source_type == "test":
+                    if self.source_type != "test":
                         print(f"  Switching to test pattern")
-                        success, message = self.set_video_source('test', '')
+                        success, message = self.set_video_source("test", "")
                         if not success:
                             print(f"  WARNING: Failed to switch to test: {message}")
 
             # Apply resolution and FPS if specified
-            if 'resolution' in defaults and 'camera_fps' in defaults:
-                resolution = tuple(defaults['resolution'])
-                fps = defaults['camera_fps']
-                if self.source_type == 'camera':
-                    self.set_camera_resolution(resolution[0], resolution[1], fps if fps else 30, 'MJPG')
+            if "resolution" in defaults and "camera_fps" in defaults:
+                resolution = tuple(defaults["resolution"])
+                fps = defaults["camera_fps"]
+                if self.source_type == "camera":
+                    self.set_camera_resolution(resolution[0], resolution[1], fps if fps else 30, "MJPG")
                     print(f"  Applied resolution: {resolution[0]}x{resolution[1]}@{fps}fps")
 
             # Apply basic camera settings
-            if 'zoom' in defaults:
-                self.zoom = defaults['zoom']
+            if "zoom" in defaults:
+                self.zoom = defaults["zoom"]
                 print(f"  Applied zoom: {self.zoom}")
 
-            if 'pan_x' in defaults and 'pan_y' in defaults:
-                self.pan_x = defaults['pan_x']
-                self.pan_y = defaults['pan_y']
+            if "pan_x" in defaults and "pan_y" in defaults:
+                self.pan_x = defaults["pan_x"]
+                self.pan_y = defaults["pan_y"]
                 print(f"  Applied pan: ({self.pan_x}, {self.pan_y})")
 
-            if 'rotation' in defaults:
-                self.rotation = defaults['rotation']
+            if "rotation" in defaults:
+                self.rotation = defaults["rotation"]
                 print(f"  Applied rotation: {self.rotation}")
 
-            if 'target_detection_enabled' in defaults:
-                self.target_detector.set_detection_enabled(defaults['target_detection_enabled'])
+            if "target_detection_enabled" in defaults:
+                self.target_detector.set_detection_enabled(defaults["target_detection_enabled"])
                 print(f"  Applied target detection: {defaults['target_detection_enabled']}")
 
-            if 'perspective_correction_enabled' in defaults:
-                self.perspective_correction_enabled = defaults['perspective_correction_enabled']
+            if "perspective_correction_enabled" in defaults:
+                self.perspective_correction_enabled = defaults["perspective_correction_enabled"]
                 print(f"  Applied perspective correction: {defaults['perspective_correction_enabled']}")
 
-            if 'detector_type' in defaults:
-                detector_type = defaults['detector_type']
+            if "detector_type" in defaults:
+                detector_type = defaults["detector_type"]
                 success, message = self.set_detector_type(detector_type)
                 if success:
                     print(f"  Applied detector type: {detector_type}")
                 else:
                     print(f"  WARNING: Failed to set detector type: {message}")
 
-            if 'debug_mode' in defaults:
-                self.target_detector.set_debug_mode(defaults['debug_mode'])
+            if "yolo_conf_threshold" in defaults:
+                self.yolo_conf_threshold = defaults["yolo_conf_threshold"]
+                print(f"  Applied YOLO confidence threshold: {self.yolo_conf_threshold}")
+
+            if "yolo_model_path" in defaults and defaults["yolo_model_path"]:
+                model_path = defaults["yolo_model_path"]
+                success, message = self.set_yolo_model(model_path)
+                if success:
+                    print(f"  Applied YOLO model: {model_path}")
+                else:
+                    print(f"  WARNING: Failed to load YOLO model: {message}")
+
+            if "continuous_detection" in defaults:
+                self.continuous_detection = defaults["continuous_detection"]
+                print(f"  Applied continuous detection: {self.continuous_detection}")
+
+            if "debug_mode" in defaults:
+                self.target_detector.set_debug_mode(defaults["debug_mode"])
                 print(f"  Applied debug mode: {defaults['debug_mode']}")
 
             # Apply V4L2 camera controls if available and camera is open
-            if 'camera_controls' in defaults and self.cached_camera_controls.get('available'):
+            if "camera_controls" in defaults and self.cached_camera_controls.get("available"):
                 if self.cap and self.cap.isOpened():
                     success_count = 0
                     total_count = 0
 
-                    for name, value in defaults['camera_controls'].items():
-                        if name in self.cached_camera_controls['controls']:
+                    for name, value in defaults["camera_controls"].items():
+                        if name in self.cached_camera_controls["controls"]:
                             total_count += 1
                             success, message = self.set_camera_control(name, value)
                             if success:
@@ -1547,61 +1760,60 @@ class CameraController:
         except Exception as e:
             print(f"Error loading defaults: {e}")
             import traceback
+
             traceback.print_exc()
             return False, f"Error loading defaults: {str(e)}"
 
     def get_camera_formats(self):
         """Get available formats and resolutions for the current camera"""
-        if self.source_type != 'camera':
-            return {'available': False, 'formats': []}
+        if self.source_type != "camera":
+            return {"available": False, "formats": []}
 
         # Find the current camera in available sources
         camera_source = None
-        for camera in self.available_sources.get('cameras', []):
-            if camera['index'] == self.camera_index:
+        for camera in self.available_sources.get("cameras", []):
+            if camera["index"] == self.camera_index:
                 camera_source = camera
                 break
 
-        if not camera_source or 'controls' not in camera_source:
-            return {'available': False, 'formats': []}
+        if not camera_source or "controls" not in camera_source:
+            return {"available": False, "formats": []}
 
-        formats_data = camera_source['controls'].get('formats', [])
+        formats_data = camera_source["controls"].get("formats", [])
 
         # Convert to UI-friendly format
         resolution_options = []
 
         for format_info in formats_data:
-            format_name = format_info.get('name', 'Unknown')
-            format_desc = format_info.get('description', '')
+            format_name = format_info.get("name", "Unknown")
+            format_desc = format_info.get("description", "")
 
-            for res_info in format_info.get('resolutions', []):
-                size = res_info.get('size', '')
-                framerates = res_info.get('framerates', [])
+            for res_info in format_info.get("resolutions", []):
+                size = res_info.get("size", "")
+                framerates = res_info.get("framerates", [])
 
                 if size and framerates:
                     # Create options for each framerate
                     for fps in sorted(framerates, reverse=True):  # Sort highest fps first
                         option = {
-                            'value': f"{size}@{fps:.0f}fps_{format_name}",
-                            'label': f"{size} @ {fps:.0f}fps ({format_name})",
-                            'width': int(size.split('x')[0]) if 'x' in size else 0,
-                            'height': int(size.split('x')[1]) if 'x' in size else 0,
-                            'fps': fps,
-                            'format': format_name,
-                            'format_desc': format_desc
+                            "value": f"{size}@{fps:.0f}fps_{format_name}",
+                            "label": f"{size} @ {fps:.0f}fps ({format_name})",
+                            "width": int(size.split("x")[0]) if "x" in size else 0,
+                            "height": int(size.split("x")[1]) if "x" in size else 0,
+                            "fps": fps,
+                            "format": format_name,
+                            "format_desc": format_desc,
                         }
                         resolution_options.append(option)
 
         # Sort by resolution (width * height) and then by fps
-        resolution_options.sort(key=lambda x: (x['width'] * x['height'], -x['fps']))
+        resolution_options.sort(key=lambda x: (x["width"] * x["height"], -x["fps"]))
 
-        return {
-            'available': True,
-            'formats': formats_data,
-            'resolution_options': resolution_options
-        }
+        return {"available": True, "formats": formats_data, "resolution_options": resolution_options}
 
-    def calibrate_perspective(self, method='auto', pattern_size=(9, 6), iterative=True, target_circularity=0.95, max_iterations=3):
+    def calibrate_perspective(
+        self, method="auto", pattern_size=(9, 6), iterative=True, target_circularity=0.95, max_iterations=3
+    ):
         """Perform perspective calibration using current frame
 
         Args:
@@ -1623,16 +1835,18 @@ class CameraController:
                     if not self._is_valid_frame(self.raw_frame):
                         return False, "Current frame is invalid for calibration"
 
-                    print(f"DEBUG: Starting perspective calibration ({method}, iterative={iterative}, "
-                          f"target_circularity={target_circularity}, max_iterations={max_iterations}) with raw frame...")
+                    print(
+                        f"DEBUG: Starting perspective calibration ({method}, iterative={iterative}, "
+                        f"target_circularity={target_circularity}, max_iterations={max_iterations}) with raw frame..."
+                    )
                     print(f"DEBUG: Frame shape: {self.raw_frame.shape}, dtype: {self.raw_frame.dtype}")
 
                     # Make a copy to ensure memory safety
                     frame_copy = self.raw_frame.copy()
 
                     # Ensure proper data type for calibration
-                    if frame_copy.dtype != 'uint8':
-                        frame_copy = frame_copy.astype('uint8')
+                    if frame_copy.dtype != "uint8":
+                        frame_copy = frame_copy.astype("uint8")
 
                     # Use perspective.py directly for calibration - it handles all matrix storage internally
                     success, message = self.perspective.calibrate_perspective(
@@ -1641,7 +1855,7 @@ class CameraController:
                         pattern_size=pattern_size,
                         iterative=iterative,
                         target_circularity=target_circularity,
-                        max_iterations=max_iterations
+                        max_iterations=max_iterations,
                     )
                     print(f"DEBUG: Calibration result: {success}, {message}")
 
@@ -1653,19 +1867,16 @@ class CameraController:
         except Exception as e:
             print(f"ERROR in calibrate_perspective: {e}")
             import traceback
+
             traceback.print_exc()
             return False, f"Calibration failed with error: {str(e)}"
-
 
     def _detect_available_sources(self):
         """Detect available cameras and video files using V4L2"""
         print("DEBUG: Detecting available sources...")
 
         # Always add test pattern as the first available source
-        self.available_sources['test'] = [{
-            'id': 'test_pattern',
-            'name': 'Test Pattern (Default)'
-        }]
+        self.available_sources["test"] = [{"id": "test_pattern", "name": "Test Pattern (Default)"}]
 
         # Use V4L2 to detect cameras properly
         camera_count = 0
@@ -1673,16 +1884,18 @@ class CameraController:
 
         for camera_info in detected_cameras:
             # Detect and cache camera controls during enumeration
-            controls_info = self._detect_camera_controls(camera_info['index'])
+            controls_info = self._detect_camera_controls(camera_info["index"])
 
-            self.available_sources['cameras'].append({
-                'id': f'camera_{camera_info["index"]}',
-                'name': camera_info['name'],
-                'index': camera_info['index'],
-                'device_path': camera_info['device_path'],
-                'driver': camera_info.get('driver', 'unknown'),
-                'controls': controls_info
-            })
+            self.available_sources["cameras"].append(
+                {
+                    "id": f"camera_{camera_info['index']}",
+                    "name": camera_info["name"],
+                    "index": camera_info["index"],
+                    "device_path": camera_info["device_path"],
+                    "driver": camera_info.get("driver", "unknown"),
+                    "controls": controls_info,
+                }
+            )
             camera_count += 1
 
         # Check for video files in samples directory
@@ -1690,13 +1903,11 @@ class CameraController:
         if os.path.exists(self.samples_dir):
             try:
                 for filename in os.listdir(self.samples_dir):
-                    if filename.lower().endswith(('.avi', '.mp4', '.mov', '.mkv', '.wmv')):
+                    if filename.lower().endswith((".avi", ".mp4", ".mov", ".mkv", ".wmv")):
                         filepath = os.path.join(self.samples_dir, filename)
-                        self.available_sources['videos'].append({
-                            'id': f'video_{filename}',
-                            'name': filename,
-                            'path': filepath
-                        })
+                        self.available_sources["videos"].append(
+                            {"id": f"video_{filename}", "name": filename, "path": filepath}
+                        )
                         video_count += 1
             except Exception as e:
                 print(f"DEBUG: Error scanning video directory: {e}")
@@ -1709,8 +1920,7 @@ class CameraController:
 
         try:
             # Method 1: Use v4l2-ctl to list devices
-            result = subprocess.run(['v4l2-ctl', '--list-devices'],
-                                  capture_output=True, text=True, timeout=5)
+            result = subprocess.run(["v4l2-ctl", "--list-devices"], capture_output=True, text=True, timeout=5)
 
             if result.returncode == 0:
                 cameras.extend(self._parse_v4l2_devices(result.stdout))
@@ -1729,55 +1939,57 @@ class CameraController:
         cameras = []
         current_device = None
 
-        for line in v4l2_output.split('\n'):
+        for line in v4l2_output.split("\n"):
             original_line = line
             line = line.strip()
             if not line:
                 continue
 
-            if original_line.startswith('\t/dev/video'):
+            if original_line.startswith("\t/dev/video"):
                 # This is a device path (indented with tab)
                 if current_device:
                     device_path = line
                     # Extract index from /dev/videoX
                     try:
-                        index = int(device_path.split('video')[1])
-                        cameras.append({
-                            'index': index,
-                            'name': current_device['name'],
-                            'device_path': device_path,
-                            'driver': current_device.get('driver', 'unknown')
-                        })
+                        index = int(device_path.split("video")[1])
+                        cameras.append(
+                            {
+                                "index": index,
+                                "name": current_device["name"],
+                                "device_path": device_path,
+                                "driver": current_device.get("driver", "unknown"),
+                            }
+                        )
                     except (ValueError, IndexError):
                         continue
-            elif not original_line.startswith('\t') and ':' in line:
+            elif not original_line.startswith("\t") and ":" in line:
                 # This is a device description line (not indented)
                 # Format: "device_name (driver_info):"
-                device_line = line.rstrip(':')
+                device_line = line.rstrip(":")
 
-                if '(' in device_line and ')' in device_line:
+                if "(" in device_line and ")" in device_line:
                     # Extract name and driver
-                    name_part = device_line.split('(')[0].strip()
-                    driver_part = device_line.split('(')[1].split(')')[0].strip()
+                    name_part = device_line.split("(")[0].strip()
+                    driver_part = device_line.split("(")[1].split(")")[0].strip()
                 else:
                     # No driver info in parentheses
                     name_part = device_line
-                    driver_part = 'unknown'
+                    driver_part = "unknown"
 
-                current_device = {
-                    'name': name_part,
-                    'driver': driver_part
-                }
+                current_device = {"name": name_part, "driver": driver_part}
 
         # Filter to only include actual camera devices (not platform devices)
         camera_devices = []
         for cam in cameras:
             # Skip platform devices, codec devices, etc.
-            if any(skip in cam['name'].lower() for skip in ['pisp', 'hevc', 'codec', 'platform']):
+            if any(skip in cam["name"].lower() for skip in ["pisp", "hevc", "codec", "platform"]):
                 continue
             # Include USB cameras and similar, or devices with "camera" in name
-            if (any(include in cam['name'].lower() for include in ['camera', 'usb', 'webcam']) or
-                'usb-' in cam['driver'] or 'camera' in cam['driver'].lower()):
+            if (
+                any(include in cam["name"].lower() for include in ["camera", "usb", "webcam"])
+                or "usb-" in cam["driver"]
+                or "camera" in cam["driver"].lower()
+            ):
                 camera_devices.append(cam)
 
         return camera_devices
@@ -1792,30 +2004,26 @@ class CameraController:
             if os.path.exists(device_path):
                 try:
                     # Try to get device info without opening camera
-                    result = subprocess.run(['v4l2-ctl', f'--device={device_path}', '--info'],
-                                          capture_output=True, text=True, timeout=2)
+                    result = subprocess.run(
+                        ["v4l2-ctl", f"--device={device_path}", "--info"], capture_output=True, text=True, timeout=2
+                    )
 
                     if result.returncode == 0:
                         # Parse device info
                         device_name = f"Camera {i}"
                         driver = "unknown"
 
-                        for line in result.stdout.split('\n'):
-                            if 'Card type' in line:
-                                device_name = line.split(':')[1].strip()
-                            elif 'Driver name' in line:
-                                driver = line.split(':')[1].strip()
+                        for line in result.stdout.split("\n"):
+                            if "Card type" in line:
+                                device_name = line.split(":")[1].strip()
+                            elif "Driver name" in line:
+                                driver = line.split(":")[1].strip()
 
                         # Skip non-camera devices
-                        if any(skip in device_name.lower() for skip in ['pisp', 'hevc', 'codec']):
+                        if any(skip in device_name.lower() for skip in ["pisp", "hevc", "codec"]):
                             continue
 
-                        cameras.append({
-                            'index': i,
-                            'name': device_name,
-                            'device_path': device_path,
-                            'driver': driver
-                        })
+                        cameras.append({"index": i, "name": device_name, "device_path": device_path, "driver": driver})
 
                 except Exception as e:
                     print(f"DEBUG: Error checking {device_path}: {e}")
@@ -1825,12 +2033,7 @@ class CameraController:
 
     def _detect_camera_controls(self, camera_index):
         """Detect camera controls and capabilities for a specific camera"""
-        controls_info = {
-            'available': False,
-            'controls': {},
-            'formats': [],
-            'error': None
-        }
+        controls_info = {"available": False, "controls": {}, "formats": [], "error": None}
 
         try:
             print(f"DEBUG: Detecting controls for camera {camera_index}...")
@@ -1846,19 +2049,19 @@ class CameraController:
                 available_controls = temp_controls.list_controls()
 
                 if len(available_controls) > 0:
-                    controls_info['available'] = True
+                    controls_info["available"] = True
 
                     # Cache control information
                     for control_name in available_controls:
                         control_data = temp_controls.get_control_info(control_name)
                         current_value = temp_controls.get(control_name)
 
-                        controls_info['controls'][control_name] = {
-                            'current': current_value,
-                            'min': control_data.min_value,
-                            'max': control_data.max_value,
-                            'default': control_data.default_value,
-                            'type': control_data.control_type
+                        controls_info["controls"][control_name] = {
+                            "current": current_value,
+                            "min": control_data.min_value,
+                            "max": control_data.max_value,
+                            "default": control_data.default_value,
+                            "type": control_data.control_type,
                         }
 
                     print(f"DEBUG: Cached {len(available_controls)} controls for camera {camera_index}")
@@ -1868,12 +2071,16 @@ class CameraController:
             # Detect available formats using v4l2-ctl
             try:
                 device_path = f"/dev/video{camera_index}"
-                result = subprocess.run(['v4l2-ctl', f'--device={device_path}', '--list-formats-ext'],
-                                      capture_output=True, text=True, timeout=5)
+                result = subprocess.run(
+                    ["v4l2-ctl", f"--device={device_path}", "--list-formats-ext"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
 
                 if result.returncode == 0:
                     formats = self._parse_v4l2_formats(result.stdout)
-                    controls_info['formats'] = formats
+                    controls_info["formats"] = formats
                     print(f"DEBUG: Found {len(formats)} formats for camera {camera_index}")
 
             except Exception as e:
@@ -1883,7 +2090,7 @@ class CameraController:
             temp_controls.close()
 
         except Exception as e:
-            controls_info['error'] = str(e)
+            controls_info["error"] = str(e)
             print(f"DEBUG: Error detecting controls for camera {camera_index}: {e}")
 
         return controls_info
@@ -1894,52 +2101,45 @@ class CameraController:
         current_format = None
         current_resolution = None
 
-        for line in format_output.split('\n'):
+        for line in format_output.split("\n"):
             line = line.strip()
             if not line:
                 continue
 
             # Format line: [0]: 'MJPG' (Motion-JPEG, compressed)
-            if line.startswith('[') and ']:' in line:
+            if line.startswith("[") and "]:" in line:
                 # Save previous format
-                if current_format and current_format.get('resolutions'):
+                if current_format and current_format.get("resolutions"):
                     formats.append(current_format)
 
-                if 'MJPG' in line or 'YUYV' in line:
-                    format_name = line.split("'")[1] if "'" in line else 'unknown'
-                    format_desc = line.split('(')[1].split(')')[0] if '(' in line else 'unknown'
-                    current_format = {
-                        'name': format_name,
-                        'description': format_desc,
-                        'resolutions': []
-                    }
+                if "MJPG" in line or "YUYV" in line:
+                    format_name = line.split("'")[1] if "'" in line else "unknown"
+                    format_desc = line.split("(")[1].split(")")[0] if "(" in line else "unknown"
+                    current_format = {"name": format_name, "description": format_desc, "resolutions": []}
                 else:
                     current_format = None
 
             # Resolution line: Size: Discrete 640x480
-            elif line.startswith('Size: Discrete') and current_format:
-                resolution = line.split('Discrete ')[1] if 'Discrete ' in line else ''
-                if 'x' in resolution:
-                    current_resolution = {
-                        'size': resolution,
-                        'framerates': []
-                    }
-                    current_format['resolutions'].append(current_resolution)
+            elif line.startswith("Size: Discrete") and current_format:
+                resolution = line.split("Discrete ")[1] if "Discrete " in line else ""
+                if "x" in resolution:
+                    current_resolution = {"size": resolution, "framerates": []}
+                    current_format["resolutions"].append(current_resolution)
 
             # Frame rate line: Interval: Discrete 0.033s (30.000 fps)
-            elif line.startswith('Interval: Discrete') and current_resolution:
-                if 'fps)' in line:
+            elif line.startswith("Interval: Discrete") and current_resolution:
+                if "fps)" in line:
                     # Extract fps from line like "Interval: Discrete 0.033s (30.000 fps)"
-                    fps_part = line.split('(')[1].split(' fps')[0] if '(' in line and ' fps' in line else ''
+                    fps_part = line.split("(")[1].split(" fps")[0] if "(" in line and " fps" in line else ""
                     try:
                         fps = float(fps_part)
-                        if fps not in current_resolution['framerates']:
-                            current_resolution['framerates'].append(fps)
+                        if fps not in current_resolution["framerates"]:
+                            current_resolution["framerates"].append(fps)
                     except ValueError:
                         continue
 
         # Add the last format if it exists
-        if current_format and current_format.get('resolutions'):
+        if current_format and current_format.get("resolutions"):
             formats.append(current_format)
 
         return formats
@@ -1958,8 +2158,8 @@ class CameraController:
 
             # For camera switching, use a safer approach that avoids OpenCV crashes
             if source_type == "camera":
-                camera_index = int(source_id.split('_')[1])
-                
+                camera_index = int(source_id.split("_")[1])
+
                 # Test the camera first before switching
                 print(f"DEBUG: Testing camera {camera_index}...")
                 test_cap = None
@@ -1969,16 +2169,16 @@ class CameraController:
                         if test_cap:
                             test_cap.release()
                         return False, f"Camera {camera_index} is not available"
-                    
+
                     # Try to read a frame to ensure it works
                     ret, frame = test_cap.read()
                     if not ret or frame is None:
                         test_cap.release()
                         return False, f"Camera {camera_index} cannot capture frames"
-                    
+
                     test_cap.release()
                     print(f"DEBUG: Camera {camera_index} test successful")
-                    
+
                 except Exception as e:
                     if test_cap:
                         try:
@@ -1987,7 +2187,7 @@ class CameraController:
                             pass
                     print(f"ERROR: Camera {camera_index} test failed: {e}")
                     return False, f"Camera {camera_index} test failed: {str(e)}"
-            
+
             # Stop current capture and wait for threads to finish
             print("DEBUG: Stopping current capture...")
             self.stop(timeout=3.0)
@@ -2008,19 +2208,19 @@ class CameraController:
             self.display_frame_number = 0
             self.total_frames = 0
             self.frame_buffer.clear()
-            
+
             # Configure new source
             if source_type == "camera":
-                camera_index = int(source_id.split('_')[1])
+                camera_index = int(source_id.split("_")[1])
                 self.camera_index = camera_index
                 self.source_type = "camera"
                 self.video_file = None
                 self.native_video_resolution = None
                 self.native_video_fps = None
                 print(f"DEBUG: Configured for camera {camera_index}")
-                
+
             elif source_type == "video":
-                filename = source_id.replace('video_', '', 1)
+                filename = source_id.replace("video_", "", 1)
                 video_path = os.path.join(self.samples_dir, filename)
                 if not os.path.exists(video_path):
                     return False, f"Video file not found: {filename}"
@@ -2038,7 +2238,7 @@ class CameraController:
 
             else:
                 return False, f"Invalid source type: {source_type}"
-            
+
             # Start new capture
             print("DEBUG: Starting new capture...")
             success = self.start_capture()
@@ -2060,6 +2260,7 @@ class CameraController:
         except Exception as e:
             print(f"CRITICAL ERROR in set_video_source: {e}")
             import traceback
+
             traceback.print_exc()
 
             # Clear switching flag on error
@@ -2102,25 +2303,27 @@ class CameraController:
             current_source = self.video_file
         else:  # test mode
             current_source = "Test Pattern"
-        
+
         status = {
-            'resolution': self.resolution,
-            'actual_resolution': current_resolution,
-            'actual_fps': current_fps,
-            'camera_fps': self.camera_fps,  # Configured FPS (None = default)
-            'zoom': self.zoom,
-            'pan_x': self.pan_x,
-            'pan_y': self.pan_y,
-            'rotation': self.rotation,
-            'running': self.running,
-            'captures_dir': self.captures_dir,
-            'source_type': self.source_type,
-            'current_source': current_source,
-            'perspective_correction_enabled': self.perspective_correction_enabled,
-            'perspective_correction_method': 'ellipse-to-circle' if self.perspective.saved_ellipse_data else 'matrix-based',
-            'is_video_mode': self.source_type == "video",
-            'native_video_resolution': self.native_video_resolution,
-            'native_video_fps': self.native_video_fps
+            "resolution": self.resolution,
+            "actual_resolution": current_resolution,
+            "actual_fps": current_fps,
+            "camera_fps": self.camera_fps,  # Configured FPS (None = default)
+            "zoom": self.zoom,
+            "pan_x": self.pan_x,
+            "pan_y": self.pan_y,
+            "rotation": self.rotation,
+            "running": self.running,
+            "captures_dir": self.captures_dir,
+            "source_type": self.source_type,
+            "current_source": current_source,
+            "perspective_correction_enabled": self.perspective_correction_enabled,
+            "perspective_correction_method": "ellipse-to-circle"
+            if self.perspective.saved_ellipse_data
+            else "matrix-based",
+            "is_video_mode": self.source_type == "video",
+            "native_video_resolution": self.native_video_resolution,
+            "native_video_fps": self.native_video_fps,
         }
 
         # Add target detection status
@@ -2133,7 +2336,13 @@ class CameraController:
 
         # Add camera controls status
         camera_controls_status = self.get_camera_controls()
-        status['camera_controls'] = camera_controls_status
+        status["camera_controls"] = camera_controls_status
+
+        # Add recording status
+        recording_status = self.get_recording_status()
+        status["recording"] = recording_status["recording"]
+        status["recording_filename"] = recording_status["filename"]
+        status["recording_duration"] = recording_status["duration"]
 
         return status
 
@@ -2224,7 +2433,7 @@ def main():
         print("DEBUG: Creating HTTP server...")
         # Create handler factory that binds camera_controller to StreamingHandler
         handler_factory = partial(StreamingHandler, camera_controller)
-        server = ThreadingHTTPServer(('0.0.0.0', 8088), handler_factory)
+        server = ThreadingHTTPServer(("0.0.0.0", 8088), handler_factory)
         print("🌐 Server starting on port 8088...")
         print("📺 Camera stream: http://localhost:8088/stream.mjpg")
         print("🖥️  Web interface: http://localhost:8088")
@@ -2243,8 +2452,9 @@ def main():
         print("🔍 Dumping all thread stacks:")
         faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
         import traceback
+
         traceback.print_exc()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

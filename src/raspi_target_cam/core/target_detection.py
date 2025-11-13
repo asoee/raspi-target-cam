@@ -4,11 +4,38 @@ Target Detection Module
 Detects shooting target circles and bullet holes using OpenCV
 """
 
+import os
+import time
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
 import cv2
 import numpy as np
-import time
 import yaml
-import os
+
+
+@dataclass
+class TargetDetectionResult:
+    """Result of target detection with stability information"""
+
+    # Detection results
+    center: Optional[Tuple[int, int]] = None  # (x, y) coordinates
+    radius: Optional[int] = None
+    target_type: Optional[str] = None  # 'pistol' or 'rifle'
+
+    # Stability information
+    is_stable: bool = False
+    confidence: float = 0.0  # 0.0 to 1.0
+    frames_detected: int = 0  # How many frames in detection history
+
+    # Additional info
+    outer_circle: Optional[Tuple[int, int, int]] = None  # (x, y, radius)
+    outer_confidence: float = 0.0
+
+    @property
+    def detected(self) -> bool:
+        """True if any detection was made (even if not stable)"""
+        return self.center is not None
 
 
 class TargetDetector:
@@ -17,11 +44,12 @@ class TargetDetector:
     def __init__(self):
         self.target_center = None
         self.target_radius = None
+        self.target_type = None  # 'pistol' or 'rifle'
         self.detection_enabled = True
 
         # Detection stability
         self.detection_history = []
-        self.max_history = 5
+        self.max_history = 3  # Reduced from 5 to 3 for faster initial detection
         self.stable_detection = None
         self.detection_confidence = 0
 
@@ -33,7 +61,7 @@ class TargetDetector:
 
         # Performance optimization - periodic detection
         self.last_detection_time = 0
-        self.detection_interval = 1.0  # Run detection every 1 second
+        self.detection_interval = 0.25  # Run detection every 0.5 seconds (was 1.0)
         self.cached_inner_result = None
         self.cached_outer_result = None
 
@@ -80,22 +108,54 @@ class TargetDetector:
         blurred = cv2.medianBlur(gray, blur_size)
 
         # Create binary mask for very dark regions (black target area)
-        # This threshold isolates the black circle from lighter areas
-        _, binary = cv2.threshold(blurred, 80, 255, cv2.THRESH_BINARY_INV)
+        # Use adaptive threshold based on image characteristics
+        # First, calculate mean intensity to determine if image is overall dark or bright
+        mean_intensity = blurred.mean()
+
+        # Adjust threshold based on mean intensity
+        # For bright images (mean > 200), use higher threshold
+        # For darker images (mean < 150), use lower threshold
+        if mean_intensity > 220:
+            threshold_value = 120  # Brighter images need higher threshold
+        elif mean_intensity > 200:
+            threshold_value = 100
+        else:
+            threshold_value = 80  # Default for normal lighting
+
+        _, binary = cv2.threshold(blurred, threshold_value, 255, cv2.THRESH_BINARY_INV)
 
         # Remove small noise with morphological operations
         kernel_size = max(5, int(5 * scale_factor))
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+        # Apply more aggressive closing to connect fragmented target areas
+        # This is especially important for rifle targets at high resolution
+        close_kernel_size = max(7, int(7 * scale_factor))
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_kernel_size, close_kernel_size))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, close_kernel, iterations=2)
 
         # Create circle detection debug visualization
         if self.debug_mode:
             self.circle_debug_frame = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
-            cv2.putText(self.circle_debug_frame, "CIRCLE DETECTION DEBUG",
-                       (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
-            cv2.putText(self.circle_debug_frame, f"Threshold: 80, Scale: {scale_factor:.1f}",
-                       (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+            cv2.putText(
+                self.circle_debug_frame,
+                "CIRCLE DETECTION DEBUG",
+                (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                (0, 255, 255),
+                3,
+            )
+            cv2.putText(
+                self.circle_debug_frame,
+                f"Threshold: {threshold_value}, Mean: {mean_intensity:.1f}, Scale: {scale_factor:.1f}",
+                (10, 100),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (255, 255, 255),
+                3,
+            )
 
         # Find contours in the binary image
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -105,9 +165,11 @@ class TargetDetector:
         best_score = 0
 
         # Scale size thresholds based on resolution
-        min_area = int(5000 * scale_factor * scale_factor)
+        # Use more conservative scaling for min_area to handle small rifle targets
+        # at high resolutions. Rifle targets can be as small as 1.6% of image area.
+        min_area = int(1000 * scale_factor * scale_factor)  # Reduced from 5000
         max_area = int(100000 * scale_factor * scale_factor)
-        min_radius = int(40 * scale_factor)
+        min_radius = int(20 * scale_factor)  # Reduced from 40 to catch smaller targets
         max_radius = int(400 * scale_factor)
 
         for contour in contours:
@@ -123,9 +185,14 @@ class TargetDetector:
             radius = int(radius)
 
             # Check if circle is reasonably sized and positioned
-            if (radius < min_radius or radius > max_radius or
-                x < radius or y < radius or
-                x + radius > w or y + radius > h):
+            if (
+                radius < min_radius
+                or radius > max_radius
+                or x < radius
+                or y < radius
+                or x + radius > w
+                or y + radius > h
+            ):
                 continue
 
             # Calculate circularity (how round the contour is)
@@ -141,7 +208,7 @@ class TargetDetector:
 
             # Position preference - prefer circles closer to center of frame
             center_x, center_y = w // 2, h // 2
-            distance_from_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+            distance_from_center = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
             max_distance = np.sqrt(center_x**2 + center_y**2)
             center_score = 1.0 - (distance_from_center / max_distance)
 
@@ -152,13 +219,13 @@ class TargetDetector:
             darkness_score = (255 - mean_intensity) / 255  # Higher for darker regions
 
             # Combined score: circularity + area fit + darkness + center position
-            score = (circularity * 0.3 +
-                    area_ratio * 0.3 +
-                    darkness_score * 0.3 +
-                    center_score * 0.1)
+            score = circularity * 0.3 + area_ratio * 0.3 + darkness_score * 0.3 + center_score * 0.1
 
             # Must be reasonably circular and dark
-            if circularity > 0.6 and darkness_score > 0.3 and score > best_score:
+            # Relaxed thresholds for rifle targets which may appear lighter or fragmented
+            # Circularity: 0.45 (was 0.6, then 0.5)
+            # Darkness: 0.2 (was 0.3) - rifle targets in bright images may appear lighter
+            if circularity > 0.45 and darkness_score > 0.2 and score > best_score:
                 best_score = score
                 best_circle = (center[0], center[1], radius)
 
@@ -173,14 +240,70 @@ class TargetDetector:
                 radius = int(best_circle[2])
                 cv2.circle(self.circle_debug_frame, center, radius, (0, 255, 0), 3)
                 cv2.circle(self.circle_debug_frame, center, 5, (0, 0, 255), -1)
-                cv2.putText(self.circle_debug_frame, f"Circle: r={radius}",
-                           (center[0] - 80, center[1] - radius - 15),
-                           cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+                cv2.putText(
+                    self.circle_debug_frame,
+                    f"Circle: r={radius}",
+                    (center[0] - 80, center[1] - radius - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (0, 255, 0),
+                    3,
+                )
 
-            cv2.putText(self.circle_debug_frame, f"Contours: {len(contours)}, Best Score: {best_score:.2f}",
-                       (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+                # Show target type if detected
+                if self.target_type:
+                    cv2.putText(
+                        self.circle_debug_frame,
+                        f"Type: {self.target_type.upper()}",
+                        (center[0] - 80, center[1] - radius - 55),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        (255, 0, 255),
+                        3,
+                    )
+
+            cv2.putText(
+                self.circle_debug_frame,
+                f"Contours: {len(contours)}, Best Score: {best_score:.2f}",
+                (10, 150),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (255, 255, 255),
+                3,
+            )
 
         return best_circle
+
+    def detect_target_type(self, frame, black_circle_area):
+        """
+        Detect whether target is a pistol or rifle target based on black center area size.
+
+        Pistol targets have a large black center (rings 7-10):
+        - Close range: ~40% of image area
+        - Far range: ~6-7% of image area
+
+        Rifle targets have a small black center:
+        - Typical: ~1.6% of image area
+
+        Args:
+            frame: Input frame (for calculating total area)
+            black_circle_area: Area of detected black circle in pixels
+
+        Returns:
+            str: 'pistol' or 'rifle'
+        """
+        h, w = frame.shape[:2]
+        total_area = h * w
+        black_percentage = (black_circle_area / total_area) * 100
+
+        # Threshold: if black area is > 3% of image, it's a pistol target
+        # Rifle targets are consistently around 1.6%, pistol targets are 6%+
+        if black_percentage > 3.0:
+            target_type = "pistol"
+        else:
+            target_type = "rifle"
+
+        return target_type
 
     def detect_outer_circle(self, frame, inner_circle=None):
         """
@@ -211,12 +334,12 @@ class TargetDetector:
         circles = cv2.HoughCircles(
             edges,
             cv2.HOUGH_GRADIENT,
-            dp=1,                    # Inverse ratio of accumulator resolution
-            minDist=min_dist,        # Minimum distance between circle centers
-            param1=50,               # Upper threshold for edge detection (already applied)
-            param2=param2,           # Accumulator threshold for center detection
-            minRadius=min_radius,    # Minimum radius for outer circle
-            maxRadius=max_radius     # Maximum radius for outer circle
+            dp=1,  # Inverse ratio of accumulator resolution
+            minDist=min_dist,  # Minimum distance between circle centers
+            param1=50,  # Upper threshold for edge detection (already applied)
+            param2=param2,  # Accumulator threshold for center detection
+            minRadius=min_radius,  # Minimum radius for outer circle
+            maxRadius=max_radius,  # Maximum radius for outer circle
         )
 
         if circles is not None:
@@ -225,17 +348,16 @@ class TargetDetector:
             best_outer_circle = None
             best_score = 0
 
-            for (x, y, r) in circles:
+            for x, y, r in circles:
                 # Check if circle is within frame bounds
                 h, w = frame.shape[:2]
-                if (x - r < 0 or y - r < 0 or
-                    x + r >= w or y + r >= h):
+                if x - r < 0 or y - r < 0 or x + r >= w or y + r >= h:
                     continue
 
                 # If we have an inner circle, outer should be concentric and larger
                 if inner_circle is not None:
                     inner_x, inner_y, inner_r = inner_circle
-                    distance_between_centers = np.sqrt((x - inner_x)**2 + (y - inner_y)**2)
+                    distance_between_centers = np.sqrt((x - inner_x) ** 2 + (y - inner_y) ** 2)
 
                     # Scale distance thresholds
                     max_center_distance = int(30 * scale_factor)
@@ -247,7 +369,7 @@ class TargetDetector:
 
                 # Prefer circles closer to center of frame
                 center_x, center_y = w // 2, h // 2
-                distance_from_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+                distance_from_center = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
                 max_distance = np.sqrt(center_x**2 + center_y**2)
                 center_score = 1.0 - (distance_from_center / max_distance)
 
@@ -271,18 +393,18 @@ class TargetDetector:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         h, w = frame.shape[:2]
         scale_factor = max(w / 640, h / 480)
-        
+
         # Edge detection with parameters similar to perspective detection
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
-        
+
         # Find contours
         contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        
+
         # Filter for ring-like contours that could be the outer ring
         min_area = int(5000 * scale_factor * scale_factor)  # Larger minimum area for outer ring
         min_circularity = 0.2  # More lenient for partially occluded rings
-        
+
         ring_contours = []
         for contour in contours:
             area = cv2.contourArea(contour)
@@ -292,63 +414,63 @@ class TargetDetector:
                     circularity = 4 * np.pi * area / (perimeter * perimeter)
                     if circularity > min_circularity:
                         ring_contours.append(contour)
-        
+
         if not ring_contours:
             return None
-            
+
         best_circle = None
         best_score = 0
-        
+
         for contour in ring_contours:
             if len(contour) < 5:  # Need at least 5 points to fit ellipse
                 continue
-                
+
             try:
                 # Fit ellipse to contour
                 ellipse = cv2.fitEllipse(contour)
                 (center_x, center_y), (minor_axis, major_axis), angle = ellipse
-                
+
                 # Convert ellipse to approximate circle (use average of axes)
                 avg_radius = (minor_axis + major_axis) / 4.0  # Divide by 4 because axes are diameters
-                
+
                 # Check if this could be an outer ring
                 aspect_ratio = max(major_axis, minor_axis) / min(major_axis, minor_axis)
-                
+
                 # More lenient aspect ratio for partially occluded outer ring
                 if aspect_ratio > 3.0:  # Too stretched, probably not a ring
                     continue
-                
+
                 # If we have inner circle, check relationship
                 if inner_circle is not None:
                     inner_x, inner_y, inner_r = inner_circle
-                    distance_between_centers = np.sqrt((center_x - inner_x)**2 + (center_y - inner_y)**2)
-                    
+                    distance_between_centers = np.sqrt((center_x - inner_x) ** 2 + (center_y - inner_y) ** 2)
+
                     max_center_distance = int(50 * scale_factor)  # More lenient for ellipse fitting
                     min_radius_diff = int(15 * scale_factor)
-                    
+
                     # Check if outer and larger
                     if distance_between_centers > max_center_distance or avg_radius <= inner_r + min_radius_diff:
                         continue
-                
+
                 # Score based on size, position, and shape quality
                 area = cv2.contourArea(contour)
                 size_score = area / (w * h)  # Prefer larger rings
-                
+
                 # Prefer rings closer to center
-                center_score = 1.0 - (abs(center_x - w/2) + abs(center_y - h/2)) / (w + h)
-                
+                center_score = 1.0 - (abs(center_x - w / 2) + abs(center_y - h / 2)) / (w + h)
+
                 # Prefer more circular shapes (penalize high aspect ratios)
                 shape_score = 1.0 / aspect_ratio
-                
+
                 score = size_score * 0.4 + center_score * 0.3 + shape_score * 0.3
-                
+
                 if score > best_score:
                     best_score = score
                     best_circle = (int(center_x), int(center_y), int(avg_radius))
-                    
+
             except cv2.error:
                 continue
-                
+
         return best_circle
 
     def _calculate_edge_score(self, edges, center, radius):
@@ -385,8 +507,8 @@ class TargetDetector:
 
         # Resize for faster comparison (quarter resolution)
         h, w = current_gray.shape
-        small_current = cv2.resize(current_gray, (w//4, h//4))
-        small_last = cv2.resize(self.last_frame_gray, (w//4, h//4))
+        small_current = cv2.resize(current_gray, (w // 4, h // 4))
+        small_last = cv2.resize(self.last_frame_gray, (w // 4, h // 4))
 
         # Calculate absolute difference
         diff = cv2.absdiff(small_current, small_last)
@@ -412,12 +534,10 @@ class TargetDetector:
             return True
 
         # Run detection if significant frame change detected
-        if self._has_significant_frame_change(frame):
-            return True
+        # if self._has_significant_frame_change(frame):
+        #    return True
 
         return False
-
-
 
     def detect_rectangular_target(self, frame):
         """
@@ -437,12 +557,10 @@ class TargetDetector:
         edges = cv2.Canny(blurred, 30, 100, apertureSize=3)
 
         # 2. Adaptive threshold with different parameters
-        thresh1 = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                       cv2.THRESH_BINARY, 11, 2)
+        thresh1 = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
 
         # 3. More sensitive adaptive threshold
-        thresh2 = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                       cv2.THRESH_BINARY, 21, 5)
+        thresh2 = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 5)
 
         # 4. Otsu's threshold for global differences
         _, thresh3 = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -470,16 +588,44 @@ class TargetDetector:
                 self.corner_debug_frame = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
 
                 # Always draw basic debug info even if no target found
-                cv2.putText(self.corner_debug_frame, f"Contours found: {len(contours)}",
-                           (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                cv2.putText(self.corner_debug_frame, "CORNER DETECTION DEBUG (FALLBACK)",
-                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                cv2.putText(self.corner_debug_frame, "Combined: Adaptive + Canny edges",
-                           (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                cv2.putText(
+                    self.corner_debug_frame,
+                    f"Contours found: {len(contours)}",
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (255, 255, 255),
+                    2,
+                )
+                cv2.putText(
+                    self.corner_debug_frame,
+                    "CORNER DETECTION DEBUG (FALLBACK)",
+                    (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 255, 255),
+                    2,
+                )
+                cv2.putText(
+                    self.corner_debug_frame,
+                    "Combined: Adaptive + Canny edges",
+                    (10, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    2,
+                )
             else:
                 # Ellipse detection already created debug frame, just add fallback info
-                cv2.putText(self.corner_debug_frame, "FALLBACK: Corner detection active",
-                           (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+                cv2.putText(
+                    self.corner_debug_frame,
+                    "FALLBACK: Corner detection active",
+                    (10, 150),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 0, 0),
+                    2,
+                )
 
             # Draw all contours in blue
             for contour in contours:
@@ -550,17 +696,21 @@ class TargetDetector:
                 efficiency = (4 * np.pi * area) / (perimeter * perimeter)
 
                 # Combined score with better weighting
-                score = (rectangularity_score * 0.3 +
-                        size_score * 0.2 +
-                        aspect_score * 0.2 +
-                        convexity_score * 0.2 +
-                        efficiency * 0.1)
+                score = (
+                    rectangularity_score * 0.3
+                    + size_score * 0.2
+                    + aspect_score * 0.2
+                    + convexity_score * 0.2
+                    + efficiency * 0.1
+                )
 
                 # Must meet minimum quality thresholds
-                if (score > best_score and
-                    area_ratio > 0.6 and  # Must be reasonably rectangular
-                    convexity_score > 0.8 and  # Must be mostly convex
-                    rectangularity_score > 0.5):  # Must approximate rectangle well
+                if (
+                    score > best_score
+                    and area_ratio > 0.6  # Must be reasonably rectangular
+                    and convexity_score > 0.8  # Must be mostly convex
+                    and rectangularity_score > 0.5
+                ):  # Must approximate rectangle well
                     best_score = score
                     best_contour = approx
 
@@ -589,14 +739,19 @@ class TargetDetector:
         for i, corner in enumerate(corners):
             cv2.circle(self.corner_debug_frame, tuple(corner.astype(int)), 8, (0, 0, 255), -1)
             # Label corners
-            label = ['TL', 'TR', 'BR', 'BL'][i]
-            cv2.putText(self.corner_debug_frame, label,
-                       (int(corner[0]) + 12, int(corner[1]) - 12),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            label = ["TL", "TR", "BR", "BL"][i]
+            cv2.putText(
+                self.corner_debug_frame,
+                label,
+                (int(corner[0]) + 12, int(corner[1]) - 12),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 255),
+                2,
+            )
 
         # Add target found text
-        cv2.putText(self.debug_frame, "TARGET FOUND!",
-                   (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(self.debug_frame, "TARGET FOUND!", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
     def _order_corners(self, corners):
         """
@@ -637,17 +792,19 @@ class TargetDetector:
 
         # Define destination points (perfect rectangle)
         width, height = output_size
-        dst_corners = np.array([
-            [0, 0],                    # top-left
-            [width - 1, 0],           # top-right
-            [width - 1, height - 1],  # bottom-right
-            [0, height - 1]           # bottom-left
-        ], dtype=np.float32)
+        dst_corners = np.array(
+            [
+                [0, 0],  # top-left
+                [width - 1, 0],  # top-right
+                [width - 1, height - 1],  # bottom-right
+                [0, height - 1],  # bottom-left
+            ],
+            dtype=np.float32,
+        )
 
         # Calculate perspective transformation matrix
         matrix = cv2.getPerspectiveTransform(corners, dst_corners)
         return matrix
-
 
     def _transform_coordinates_back(self, circle_data, matrix, original_shape):
         """
@@ -852,11 +1009,44 @@ class TargetDetector:
             return None
 
         # Calculate confidence based on consistency and number of valid detections
-        consistency_score = 1.0 / (1.0 + x_std + y_std + r_std/10)
+        consistency_score = 1.0 / (1.0 + x_std + y_std + r_std / 10)
         detection_ratio = len(valid_detections) / len(self.detection_history)
         self.detection_confidence = consistency_score * detection_ratio
 
         return (avg_x, avg_y, avg_radius)
+
+    def _estimate_outer_ring(self, inner_circle, target_type):
+        """
+        Estimate outer ring position and size from inner circle based on physical dimensions.
+
+        Physical measurements:
+        - Pistol targets: Inner black circle 10cm, outermost ring 20cm (ratio: 2.0)
+        - Rifle targets: Inner black circle 4.1cm, outermost ring 8.7cm (ratio: 2.122)
+
+        Args:
+            inner_circle: (x, y, radius) of detected inner circle
+            target_type: 'pistol' or 'rifle'
+
+        Returns:
+            tuple: (x, y, radius) for estimated outer ring
+        """
+        if inner_circle is None or target_type is None:
+            return None
+
+        x, y, inner_radius = inner_circle
+
+        # Physical dimension ratios (diameter outer / diameter inner)
+        if target_type == 'rifle':
+            # Rifle: 8.7cm / 4.1cm = 2.122
+            OUTER_TO_INNER_RATIO = 2.122
+        else:  # pistol
+            # Pistol: 20cm / 10cm = 2.0
+            OUTER_TO_INNER_RATIO = 2.0
+
+        # Calculate estimated outer radius
+        estimated_outer_radius = int(inner_radius * OUTER_TO_INNER_RATIO)
+
+        return (x, y, estimated_outer_radius)
 
     def _get_stable_outer_detection(self):
         """Get stable outer circle detection from history using averaging"""
@@ -899,22 +1089,26 @@ class TargetDetector:
             return None
 
         # Calculate confidence
-        consistency_score = 1.0 / (1.0 + x_std + y_std + r_std/10)
+        consistency_score = 1.0 / (1.0 + x_std + y_std + r_std / 10)
         detection_ratio = len(valid_detections) / len(self.outer_circle_history)
         self.outer_confidence = consistency_score * detection_ratio
 
         return (avg_x, avg_y, avg_radius)
 
-    def detect_target(self, frame):
+    def detect_target(self, frame) -> TargetDetectionResult:
         """
         Main target detection method with caching and periodic detection
+
+        Returns:
+            TargetDetectionResult with detection info and stability metrics
         """
         if not self.detection_enabled:
-            return self.cached_inner_result
+            # Return cached result or empty result
+            return self._build_detection_result(self.cached_inner_result, use_cached=True)
 
         # Check if we should run detection or use cached results
         should_detect = self._should_run_detection(frame)
-
+        # print(f"Should detect: {should_detect}")
         if should_detect:
             # Update detection timestamp
             self.last_detection_time = time.time()
@@ -928,47 +1122,128 @@ class TargetDetector:
             # Note: Perspective correction is now handled by CameraController before this method is called
             current_inner = self.detect_black_circle_improved(frame)
 
-            # No coordinate transformation needed since perspective correction is handled upstream
-
+            # Add to history
             self._add_to_history(current_inner)
+
+            # Get stable detection (requires multiple frames)
             stable_inner = self._get_stable_detection()
 
+            if current_inner is not None:
+                # Detect target type based on black circle area
+                black_circle_area = np.pi * (current_inner[2] ** 2)
+                # print(f"Black circle area: {black_circle_area}")
+                self.target_type = self.detect_target_type(frame, black_circle_area)
+            else:
+                print("no current inner")
+                self.stable_inner = None
+                self.stable_detection = None
+
+            # Update stable state if we have a stable detection
             if stable_inner is not None:
                 self.stable_detection = stable_inner
                 self.target_center = (stable_inner[0], stable_inner[1])
                 self.target_radius = stable_inner[2]
                 self.cached_inner_result = stable_inner
+
+                # Detect target type based on black circle area
+                black_circle_area = np.pi * (stable_inner[2] ** 2)
+                self.target_type = self.detect_target_type(frame, black_circle_area)
             elif self.stable_detection is not None and self.detection_confidence > 0.3:
+                # Use previous stable detection if confidence is still good
                 stable_inner = self.stable_detection
                 self.cached_inner_result = stable_inner
+            else:
+                # No detection - clear cached values
+                if current_inner is None:
+                    self.target_center = None
+                    self.target_radius = None
+                    self.target_type = None
+                    self.stable_detection = None
+                    self.cached_inner_result = None
 
             # Detect outer circle using ellipse-based method (better for partial occlusion)
-            current_outer = self.detect_outer_circle_ellipse_based(frame, stable_inner)
-            
+            # Use stable_inner if available, otherwise use current_inner for estimation
+            inner_for_outer_detection = stable_inner if stable_inner is not None else current_inner
+
+            current_outer = self.detect_outer_circle_ellipse_based(frame, inner_for_outer_detection)
+
             # Fallback to original HoughCircles method if ellipse method fails
             if current_outer is None:
-                current_outer = self.detect_outer_circle(frame, stable_inner)
+                current_outer = self.detect_outer_circle(frame, inner_for_outer_detection)
 
-            # No coordinate transformation needed since perspective correction is handled upstream
-
+            # Add outer to history
             self._add_outer_to_history(current_outer)
             stable_outer = self._get_stable_outer_detection()
 
             if stable_outer is not None:
+                # Prefer detected outer ring (highest priority)
                 self.stable_outer_circle = stable_outer
                 self.outer_circle = stable_outer
                 self.cached_outer_result = stable_outer
             elif self.stable_outer_circle is not None and self.outer_confidence > 0.3:
+                # Use previously detected outer ring if confidence is still good
                 stable_outer = self.stable_outer_circle
                 self.cached_outer_result = stable_outer
+            else:
+                # Fallback: Estimate outer ring from inner circle if not detected
+                # Use current_inner if we don't have stable yet
+                inner_for_estimation = stable_inner if stable_inner is not None else current_inner
+                if inner_for_estimation is not None and self.target_type is not None:
+                    estimated_outer = self._estimate_outer_ring(inner_for_estimation, self.target_type)
+                    self.outer_circle = estimated_outer
+                    self.cached_outer_result = estimated_outer
+                    if self.debug_mode:
+                        print(f"      Estimating outer ring: inner_r={inner_for_estimation[2]}, estimated_outer_r={estimated_outer[2]}, type={self.target_type}")
+
+            # Return result with current detection (even if not stable yet)
+            # Use current_inner if available, otherwise use stable_inner
+            result = self._build_detection_result(current_inner or stable_inner, use_cached=False)
+            # print(f"returning current result: {result}")
+            return result
 
         else:
             # Use cached results - no detection needed
-            stable_inner = self.cached_inner_result
-            if self.cached_outer_result:
-                self.outer_circle = self.cached_outer_result
+            result = self._build_detection_result(self.cached_inner_result, use_cached=True)
+            # print(f"returning cached result: {result}")
+            return result
 
-        return stable_inner  # Return inner circle as main target
+    def _build_detection_result(self, detection_tuple, use_cached=False) -> TargetDetectionResult:
+        """Build a TargetDetectionResult from detection tuple"""
+        # If no detection at all
+        if detection_tuple is None:
+            return TargetDetectionResult()
+
+        # Extract center and radius from tuple
+        x, y, radius = detection_tuple
+        center = (int(x), int(y))
+
+        # Calculate target type if we have a detection
+        target_type = self.target_type
+        if target_type is None and detection_tuple is not None:
+            # Calculate on the fly if not cached
+            h, w = 1944, 2592  # Default frame size, will be overridden if frame available
+            black_circle_area = np.pi * (radius**2)
+            total_area = h * w
+            black_percentage = (black_circle_area / total_area) * 100
+            target_type = "pistol" if black_percentage > 3.0 else "rifle"
+
+        # Determine stability
+        is_stable = self.stable_detection is not None
+        frames_detected = len([d for d in self.detection_history if d is not None])
+
+        # Build result
+        result = TargetDetectionResult(
+            center=center,
+            radius=int(radius),
+            target_type=target_type,
+            is_stable=is_stable,
+            confidence=self.detection_confidence,
+            frames_detected=frames_detected,
+            outer_circle=self.outer_circle,
+            outer_confidence=self.outer_confidence,
+        )
+
+        return result
 
     def draw_target_overlay(self, frame, target_info=None, frame_is_corrected=False):
         """
@@ -1022,8 +1297,8 @@ class TargetDetector:
             cv2.circle(frame, (x, y), radius, inner_color, thickness)
 
             # Draw center crosshair
-            cv2.line(frame, (x-15, y), (x+15, y), inner_color, 2)
-            cv2.line(frame, (x, y-15), (x, y+15), inner_color, 2)
+            cv2.line(frame, (x - 15, y), (x + 15, y), inner_color, 2)
+            cv2.line(frame, (x, y - 15), (x, y + 15), inner_color, 2)
 
             # Add center dot
             cv2.circle(frame, (x, y), 3, inner_color, -1)
@@ -1034,14 +1309,17 @@ class TargetDetector:
 
             # Background rectangle for text
             label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
-            cv2.rectangle(frame,
-                         (x - label_size[0]//2 - 5, y - radius - 25),
-                         (x + label_size[0]//2 + 5, y - radius - 5),
-                         (0, 0, 0), -1)
+            cv2.rectangle(
+                frame,
+                (x - label_size[0] // 2 - 5, y - radius - 25),
+                (x + label_size[0] // 2 + 5, y - radius - 5),
+                (0, 0, 0),
+                -1,
+            )
 
-            cv2.putText(frame, label,
-                       (x - label_size[0]//2, y - radius - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, inner_color, 1)
+            cv2.putText(
+                frame, label, (x - label_size[0] // 2, y - radius - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, inner_color, 1
+            )
 
         # Draw outer circle
         outer_circle_info = self.outer_circle
@@ -1072,14 +1350,23 @@ class TargetDetector:
 
             # Position outer label below the outer circle
             outer_label_size = cv2.getTextSize(outer_label, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0]
-            cv2.rectangle(frame,
-                         (ox - outer_label_size[0]//2 - 3, oy + oradius + 5),
-                         (ox + outer_label_size[0]//2 + 3, oy + oradius + 20),
-                         (0, 0, 0), -1)
+            cv2.rectangle(
+                frame,
+                (ox - outer_label_size[0] // 2 - 3, oy + oradius + 5),
+                (ox + outer_label_size[0] // 2 + 3, oy + oradius + 20),
+                (0, 0, 0),
+                -1,
+            )
 
-            cv2.putText(frame, outer_label,
-                       (ox - outer_label_size[0]//2, oy + oradius + 17),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, outer_color, 1)
+            cv2.putText(
+                frame,
+                outer_label,
+                (ox - outer_label_size[0] // 2, oy + oradius + 17),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                outer_color,
+                1,
+            )
 
         # Draw rectangular target outline if detected
         if self.target_corners is not None:
@@ -1094,14 +1381,14 @@ class TargetDetector:
             for i, corner in enumerate(corners_int):
                 cv2.circle(frame, tuple(corner), 5, target_color, -1)
                 # Label corners
-                label = ['TL', 'TR', 'BR', 'BL'][i]
-                cv2.putText(frame, label, (corner[0] + 8, corner[1] - 8),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, target_color, 1)
+                label = ["TL", "TR", "BR", "BL"][i]
+                cv2.putText(
+                    frame, label, (corner[0] + 8, corner[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.4, target_color, 1
+                )
 
             # Add perspective correction status
             if self.perspective_matrix is not None:
-                cv2.putText(frame, "PERSPECTIVE CORRECTED", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, target_color, 2)
+                cv2.putText(frame, "PERSPECTIVE CORRECTED", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, target_color, 2)
 
         return frame
 
@@ -1132,23 +1419,23 @@ class TargetDetector:
             gray_roi,
             cv2.HOUGH_GRADIENT,
             dp=1,
-            minDist=10,              # Small distance between holes
+            minDist=10,  # Small distance between holes
             param1=50,
-            param2=15,               # Lower threshold for small holes
-            minRadius=2,             # Very small holes
-            maxRadius=15             # Maximum hole size
+            param2=15,  # Lower threshold for small holes
+            minRadius=2,  # Very small holes
+            maxRadius=15,  # Maximum hole size
         )
 
         bullet_holes = []
         if holes is not None:
             holes = np.round(holes[0, :]).astype("int")
-            for (x, y, r) in holes:
+            for x, y, r in holes:
                 # Convert back to full frame coordinates
                 full_x = x + x1
                 full_y = y + y1
 
                 # Check if hole is within target circle
-                distance = np.sqrt((full_x - x_center)**2 + (full_y - y_center)**2)
+                distance = np.sqrt((full_x - x_center) ** 2 + (full_y - y_center) ** 2)
                 if distance <= target_radius:
                     bullet_holes.append((full_x, full_y, r))
 
@@ -1213,7 +1500,7 @@ class TargetDetector:
         else:  # combined or fallback
             return self.debug_frame
 
-    def get_debug_frame_jpeg(self, debug_type='combined'):
+    def get_debug_frame_jpeg(self, debug_type="combined"):
         """Get debug frame as JPEG bytes for streaming
 
         Args:
@@ -1221,7 +1508,7 @@ class TargetDetector:
         """
         debug_frame = self.get_debug_frame(debug_type)
         if debug_frame is not None:
-            _, buffer = cv2.imencode('.jpg', debug_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            _, buffer = cv2.imencode(".jpg", debug_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             return buffer.tobytes()
         return None
 
@@ -1281,8 +1568,15 @@ class TargetDetector:
             self.debug_frame[:h, :w] = resized_corner
         else:
             # Fill with gray and add text
-            cv2.putText(self.debug_frame, "Ellipse Detection Not Available",
-                       (10, h//2), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (128, 128, 128), 3)
+            cv2.putText(
+                self.debug_frame,
+                "Ellipse Detection Not Available",
+                (10, h // 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                (128, 128, 128),
+                3,
+            )
 
         # Right side: circle detection
         if self.circle_debug_frame is not None:
@@ -1290,14 +1584,19 @@ class TargetDetector:
             self.debug_frame[:h, w:] = resized_circle
         else:
             # Fill with gray and add text
-            cv2.putText(self.debug_frame, "Circle Detection Not Available",
-                       (w + 10, h//2), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (128, 128, 128), 3)
+            cv2.putText(
+                self.debug_frame,
+                "Circle Detection Not Available",
+                (w + 10, h // 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                (128, 128, 128),
+                3,
+            )
 
         # Add labels with larger fonts
-        cv2.putText(self.debug_frame, "ELLIPSE DETECTION", (10, 40),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
-        cv2.putText(self.debug_frame, "CIRCLE DETECTION", (w + 10, 40),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
+        cv2.putText(self.debug_frame, "ELLIPSE DETECTION", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
+        cv2.putText(self.debug_frame, "CIRCLE DETECTION", (w + 10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
 
         # Add separator line
         cv2.line(self.debug_frame, (w, 0), (w, h), (255, 255, 255), 2)
@@ -1308,24 +1607,25 @@ class TargetDetector:
         time_since_detection = current_time - self.last_detection_time
 
         return {
-            'detection_enabled': self.detection_enabled,
-            'target_center': self.target_center,
-            'target_radius': self.target_radius,
-            'detection_confidence': self.detection_confidence,
-            'stable_detection': self.stable_detection is not None,
-            'outer_circle': self.outer_circle,
-            'outer_confidence': self.outer_confidence,
-            'stable_outer_detection': self.stable_outer_circle is not None,
-            'detection_interval': self.detection_interval,
-            'time_since_detection': time_since_detection,
-            'using_cached_result': time_since_detection < self.detection_interval,
-            'target_corners': self.target_corners.tolist() if self.target_corners is not None else None,
+            "detection_enabled": self.detection_enabled,
+            "target_center": self.target_center,
+            "target_radius": self.target_radius,
+            "target_type": self.target_type,
+            "detection_confidence": self.detection_confidence,
+            "stable_detection": self.stable_detection is not None,
+            "outer_circle": self.outer_circle,
+            "outer_confidence": self.outer_confidence,
+            "stable_outer_detection": self.stable_outer_circle is not None,
+            "detection_interval": self.detection_interval,
+            "time_since_detection": time_since_detection,
+            "using_cached_result": time_since_detection < self.detection_interval,
+            "target_corners": self.target_corners.tolist() if self.target_corners is not None else None,
             # Note: perspective_correction_enabled removed - now handled by CameraController
-            'debug_mode': self.debug_mode,
-            'debug_type': self.debug_type,
-            'calibration_mode': self.calibration_mode,
-            'has_saved_calibration': False,  # Perspective now handled by CameraController
-            'calibration_resolution': None  # Perspective now handled by CameraController
+            "debug_mode": self.debug_mode,
+            "debug_type": self.debug_type,
+            "calibration_mode": self.calibration_mode,
+            "has_saved_calibration": False,  # Perspective now handled by CameraController
+            "calibration_resolution": None,  # Perspective now handled by CameraController
         }
 
     def save_perspective_calibration(self, camera_resolution=None):
@@ -1344,7 +1644,6 @@ class TargetDetector:
         """Enable or disable calibration mode"""
         self.calibration_mode = enabled
         return True
-
 
     def get_perspective_matrix(self):
         """Get the current perspective matrix for main stream correction"""

@@ -162,6 +162,10 @@ class BulletHoleDetector:
                 # Handle shorter tuple format
                 x, y, radius, score = hole_data[:4]
 
+            # Ensure radius is positive
+            if radius < 0:
+                continue
+
             # Color coding based on confidence
             if score > 0.5:
                 color = (0, 255, 0)  # Green for high confidence
@@ -170,8 +174,9 @@ class BulletHoleDetector:
             else:
                 color = (0, 165, 255)  # Orange for low confidence
 
-            # Draw main circle around bullet hole
-            cv2.circle(overlay_frame, (int(x), int(y)), int(radius + 5), color, 3)
+            # Draw main circle around bullet hole (ensure positive radius)
+            draw_radius = max(1, int(radius + 5))
+            cv2.circle(overlay_frame, (int(x), int(y)), draw_radius, color, 3)
 
             # Draw inner circle for precise location
             # cv2.circle(overlay_frame, (int(x), int(y)), max(3, int(radius // 3)), color, 2)
