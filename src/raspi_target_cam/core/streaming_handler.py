@@ -405,6 +405,11 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 if self.camera_controller.set_pan(pan_x, pan_y):
                     response = {'success': True, 'message': f'Pan set to ({pan_x}, {pan_y})'}
 
+            elif path == '/api/auto_zoom':
+                enabled = data.get('enabled', False)
+                if self.camera_controller.set_auto_zoom(enabled):
+                    response = {'success': True, 'message': f'Auto-zoom {"enabled" if enabled else "disabled"}'}
+
             elif path == '/api/rotation':
                 rotation = data.get('rotation', 0)
                 if self.camera_controller.set_rotation(rotation):

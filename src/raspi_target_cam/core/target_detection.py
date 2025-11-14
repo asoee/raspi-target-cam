@@ -1036,7 +1036,7 @@ class TargetDetector:
         x, y, inner_radius = inner_circle
 
         # Physical dimension ratios (diameter outer / diameter inner)
-        if target_type == 'rifle':
+        if target_type == "rifle":
             # Rifle: 8.7cm / 4.1cm = 2.122
             OUTER_TO_INNER_RATIO = 2.122
         else:  # pistol
@@ -1134,7 +1134,7 @@ class TargetDetector:
                 # print(f"Black circle area: {black_circle_area}")
                 self.target_type = self.detect_target_type(frame, black_circle_area)
             else:
-                print("no current inner")
+                # print("no current inner")
                 self.stable_inner = None
                 self.stable_detection = None
 
@@ -1193,7 +1193,9 @@ class TargetDetector:
                     self.outer_circle = estimated_outer
                     self.cached_outer_result = estimated_outer
                     if self.debug_mode:
-                        print(f"      Estimating outer ring: inner_r={inner_for_estimation[2]}, estimated_outer_r={estimated_outer[2]}, type={self.target_type}")
+                        print(
+                            f"      Estimating outer ring: inner_r={inner_for_estimation[2]}, estimated_outer_r={estimated_outer[2]}, type={self.target_type}"
+                        )
 
             # Return result with current detection (even if not stable yet)
             # Use current_inner if available, otherwise use stable_inner

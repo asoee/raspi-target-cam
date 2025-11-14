@@ -87,6 +87,7 @@ class CameraController:
         self.zoom = 1.0
         self.pan_x = 0
         self.pan_y = 0
+        self.auto_zoom_enabled = False  # Auto-zoom to target when detected
         self.rotation = 270  # degrees clockwise (270 = 90 anti-clockwise)
 
         # Capture settings
@@ -129,6 +130,10 @@ class CameraController:
         self.buffer_size = 50
         self.pause_buffer_index = 25  # Index in buffer where we paused (25 frames back from pause point)
         self.pause_frame_number = 0  # Frame number when we paused
+
+        # Thread tracking for proper shutdown
+        self.processing_thread = None
+        self.thread_id_counter = 0  # For logging unique thread IDs
 
         # Target detection
         self.target_detector = TargetDetector()
@@ -446,18 +451,29 @@ class CameraController:
                 test_frame_generator=test_gen,
             )
             self.capture_system.start()
+            print(f"DEBUG: FrameReader thread started (source: {self.source_type})")
 
             # Start processing loop for transformations and detection
-            threading.Thread(target=self._processing_loop, daemon=True).start()
+            self.thread_id_counter += 1
+            thread_id = self.thread_id_counter
+            self.processing_thread = threading.Thread(
+                target=self._processing_loop, args=(thread_id,), daemon=True, name=f"ProcessingLoop-{thread_id}"
+            )
+            self.processing_thread.start()
+            print(f"DEBUG: Processing loop thread {thread_id} started (source: {self.source_type})")
 
             return True
         except Exception as e:
             print(f"Failed to initialize capture: {e}")
             return False
 
-    def _processing_loop(self):
-        """Processing loop for transformations, perspective correction, and detection"""
-        print("DEBUG: Processing loop started")
+    def _processing_loop(self, thread_id):
+        """Processing loop for transformations, perspective correction, and detection
+
+        Args:
+            thread_id: Unique identifier for this thread instance
+        """
+        print(f"DEBUG: Processing loop {thread_id} started")
 
         last_processed_change_counter = -1  # Track last processed frame using change counter
 
@@ -506,6 +522,10 @@ class CameraController:
                     # Update previous target state
                     self.previous_target_detected = target_detected
 
+                    # Update auto-zoom if enabled
+                    if target_detected:
+                        self._update_auto_zoom()
+
                     # Step 3: Run continuous bullet hole detection if enabled (on corrected frame, before zoom/pan)
                     # IMPORTANT: Only run if target is detected, and detection runs on perspective-corrected frame
                     if target_detected and self.continuous_detection and self.detector_type == "yolo":
@@ -543,13 +563,13 @@ class CameraController:
                 time.sleep(0.01)
 
             except Exception as e:
-                print(f"ERROR in _processing_loop: {e}")
+                print(f"ERROR in _processing_loop {thread_id}: {e}")
                 import traceback
 
                 traceback.print_exc()
                 time.sleep(0.1)
 
-        print("DEBUG: Processing loop stopped")
+        print(f"DEBUG: Processing loop {thread_id} stopped")
 
     def _apply_transformations(self, frame):
         """Apply rotation and perspective correction (pre-detection transformations)
@@ -860,6 +880,69 @@ class CameraController:
         self.pan_x = max(-100, min(100, int(pan_x)))
         self.pan_y = max(-100, min(100, int(pan_y)))
         return True
+
+    def set_auto_zoom(self, enabled):
+        """Enable/disable auto-zoom to target"""
+        self.auto_zoom_enabled = bool(enabled)
+        if not enabled:
+            # Reset zoom and pan when disabling auto-zoom
+            self.zoom = 1.0
+            self.pan_x = 0
+            self.pan_y = 0
+        return True
+
+    def _update_auto_zoom(self):
+        """Update zoom and pan to frame the detected target with outer ring + 5%"""
+        if not self.auto_zoom_enabled:
+            return
+
+        # Check if target is detected and we have outer circle
+        if not self.target_detector.target_center or not self.target_detector.outer_circle:
+            return
+
+        # Get frame dimensions (after rotation)
+        h, w = self.resolution[1], self.resolution[0]
+        if self.rotation in [90, 270]:
+            h, w = w, h
+
+        # Get target info
+        target_x, target_y = self.target_detector.target_center
+        outer_x, outer_y, outer_radius = self.target_detector.outer_circle
+
+        # Calculate desired viewport: outer diameter + 5% padding
+        desired_diameter = outer_radius * 2 * 1.05
+
+        # Calculate zoom level needed to fit this in the frame
+        # Use the smaller dimension to ensure target fits
+        frame_size = min(w, h)
+        zoom_level = frame_size / desired_diameter
+
+        # Clamp zoom to valid range
+        zoom_level = max(1.0, min(5.0, zoom_level))
+
+        # Calculate pan needed to center the target
+        # Pan values are -100 to 100, representing percentage of frame to shift
+        # Target position is in original frame coordinates
+        frame_center_x = w / 2
+        frame_center_y = h / 2
+
+        # Offset from center (in pixels)
+        offset_x = target_x - frame_center_x
+        offset_y = target_y - frame_center_y
+
+        # Convert to pan percentage (-100 to 100)
+        # Pan moves the viewport, so positive pan moves image left (target right)
+        pan_x = int((offset_x / frame_center_x) * 100)
+        pan_y = int((offset_y / frame_center_y) * 100)
+
+        # Clamp pan values
+        pan_x = max(-100, min(100, pan_x))
+        pan_y = max(-100, min(100, pan_y))
+
+        # Apply zoom and pan
+        self.zoom = zoom_level
+        self.pan_x = pan_x
+        self.pan_y = pan_y
 
     def set_rotation(self, degrees):
         """Set rotation in degrees (0, 90, 180, 270)"""
@@ -2312,6 +2395,7 @@ class CameraController:
             "zoom": self.zoom,
             "pan_x": self.pan_x,
             "pan_y": self.pan_y,
+            "auto_zoom_enabled": self.auto_zoom_enabled,
             "rotation": self.rotation,
             "running": self.running,
             "captures_dir": self.captures_dir,
@@ -2362,18 +2446,26 @@ class CameraController:
             except Exception as e:
                 print(f"WARNING: Error stopping recording: {e}")
 
-        # Stop the threaded capture system (this waits for threads)
+        # Stop the threaded capture system (this waits for FrameReader thread)
         if self.capture_system:
             try:
-                print("DEBUG: Stopping capture system...")
+                print("DEBUG: Stopping capture system (FrameReader thread)...")
                 self.capture_system.stop(timeout=timeout)
+                print("DEBUG: FrameReader thread stopped")
                 self.capture_system = None
             except Exception as e:
                 print(f"WARNING: Error stopping capture system: {e}")
 
-        # Additional safety wait for processing loop to finish
-        # The processing loop checks self.running flag
-        time.sleep(0.2)
+        # Wait for processing loop thread to finish
+        # The processing loop checks self.running flag which we set to False above
+        if self.processing_thread and self.processing_thread.is_alive():
+            print(f"DEBUG: Waiting for processing loop thread to stop (timeout={timeout}s)...")
+            self.processing_thread.join(timeout=timeout)
+            if self.processing_thread.is_alive():
+                print(f"WARNING: Processing loop thread did not stop within {timeout}s timeout")
+            else:
+                print("DEBUG: Processing loop thread stopped")
+            self.processing_thread = None
 
         # Release capture device
         if self.cap:
@@ -2423,11 +2515,16 @@ def main():
         else:
             print(f"⚠️  {message}")
 
-        print("DEBUG: Starting capture...")
-        if not camera_controller.start_capture():
-            print("❌ Failed to initialize camera")
-            return
-        print("✅ Camera initialized successfully")
+        # Only start capture if not already running (load_camera_defaults may have started it)
+        if not camera_controller.running:
+            print("DEBUG: Starting capture...")
+            if not camera_controller.start_capture():
+                print("❌ Failed to initialize camera")
+                return
+            print("✅ Camera initialized successfully")
+        else:
+            print("✅ Camera already running (started by defaults)")
+            print(f"   Source: {camera_controller.source_type}")
 
         # Start unified HTTP server
         print("DEBUG: Creating HTTP server...")
