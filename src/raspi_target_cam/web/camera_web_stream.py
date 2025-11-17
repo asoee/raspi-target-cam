@@ -167,6 +167,12 @@ class CameraController:
         # Track previous target detection state to detect transitions
         self.previous_target_detected = False
 
+        # Auto-screenshot on target removal
+        self.auto_screenshot_enabled = False  # Toggle for auto-screenshot feature
+        self.auto_screenshot_frames_back = 5  # Number of frames to go back (default: 5)
+        self.corrected_frame_buffer = []  # Rolling buffer of recent corrected frames
+        self.corrected_frame_buffer_size = 30  # Keep last 30 frames (~1 second at 30fps)
+
         # Camera controls
         self.camera_controls = None  # Will be initialized when camera is opened
         self.cached_camera_controls = {"available": False, "controls": {}}  # Cached controls from detection
@@ -520,6 +526,10 @@ class CameraController:
                         print("Target lost - clearing bullet holes")
                         self.clear_bullet_holes()
 
+                        # Auto-save screenshot if enabled
+                        if self.auto_screenshot_enabled:
+                            self._auto_save_screenshot()
+
                     # Update previous target state
                     self.previous_target_detected = target_detected
 
@@ -553,6 +563,11 @@ class CameraController:
                     with self.lock:
                         self.frame = display_frame.copy()  # Store display frame for streaming
                         self.corrected_frame = corrected_frame.copy()  # Store corrected frame for screenshots
+
+                        # Add corrected frame to rolling buffer for auto-screenshot
+                        self.corrected_frame_buffer.append(corrected_frame.copy())
+                        if len(self.corrected_frame_buffer) > self.corrected_frame_buffer_size:
+                            self.corrected_frame_buffer.pop(0)  # Remove oldest frame
 
                     # Update playback position for video files
                     if self.source_type == "video":
@@ -1165,6 +1180,43 @@ class CameraController:
                 MetadataHandler.embed_image_metadata(filepath, metadata)
 
                 return filename
+        return None
+
+    def _auto_save_screenshot(self):
+        """Auto-save screenshot from N frames back when target is removed"""
+        with self.lock:
+            if not self.corrected_frame_buffer:
+                print("Auto-screenshot: No frames in buffer")
+                return None
+
+            # Calculate which frame to save (N frames back from current)
+            frames_back = min(self.auto_screenshot_frames_back, len(self.corrected_frame_buffer) - 1)
+            buffer_index = len(self.corrected_frame_buffer) - 1 - frames_back
+
+            if buffer_index < 0:
+                buffer_index = 0
+
+            frame_to_save = self.corrected_frame_buffer[buffer_index]
+
+            if frame_to_save is not None:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"auto_capture_{timestamp}.jpg"
+                filepath = os.path.join(self.captures_dir, filename)
+
+                # Get metadata
+                metadata = self._get_camera_controls_metadata()
+                metadata["auto_screenshot"] = True
+                metadata["frames_back"] = frames_back
+
+                # Save with OpenCV at 100% JPEG quality
+                cv2.imwrite(filepath, frame_to_save, [cv2.IMWRITE_JPEG_QUALITY, 100])
+
+                # Embed metadata as EXIF
+                MetadataHandler.embed_image_metadata(filepath, metadata)
+
+                print(f"Auto-screenshot saved: {filename} ({frames_back} frames back)")
+                return filename
+
         return None
 
     def set_reference_frame(self):
@@ -2444,6 +2496,10 @@ class CameraController:
         status["recording"] = recording_status["recording"]
         status["recording_filename"] = recording_status["filename"]
         status["recording_duration"] = recording_status["duration"]
+
+        # Add auto-screenshot status
+        status["auto_screenshot_enabled"] = self.auto_screenshot_enabled
+        status["auto_screenshot_frames_back"] = self.auto_screenshot_frames_back
 
         return status
 

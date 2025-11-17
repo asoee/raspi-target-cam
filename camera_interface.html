@@ -1072,6 +1072,35 @@
                 🔴 Start Recording
               </button>
             </div>
+
+            <div class="control-row">
+              <label>
+                <input
+                  type="checkbox"
+                  id="autoScreenshotEnabled"
+                  onchange="toggleAutoScreenshot()"
+                  disabled
+                />
+                Auto-save on target removal
+              </label>
+            </div>
+
+            <div class="control-row">
+              <label>Frames back:</label>
+              <input
+                type="number"
+                id="autoScreenshotFramesBack"
+                min="0"
+                max="30"
+                value="5"
+                onchange="updateAutoScreenshotFrames()"
+                disabled
+                style="width: 60px;"
+              />
+              <span style="font-size: 0.9em; color: #888;">
+                (0-30 frames)
+              </span>
+            </div>
           </div>
 
           <div class="control-group">
@@ -1231,6 +1260,8 @@
           "saveCalibrationBtn",
           "captureBtn",
           "recordBtn",
+          "autoScreenshotEnabled",
+          "autoScreenshotFramesBack",
           "detectorType",
           "continuousDetection",
           "yoloModel",
@@ -1823,6 +1854,43 @@
             .catch((error) => {
               btn.disabled = false;
               updateStatus(`❌ Start recording error: ${error}`, true);
+            });
+        }
+      }
+
+      function toggleAutoScreenshot() {
+        const enabled = document.getElementById("autoScreenshotEnabled").checked;
+        const framesBack = parseInt(document.getElementById("autoScreenshotFramesBack").value) || 5;
+
+        apiCall("/api/set_auto_screenshot", { enabled: enabled, frames_back: framesBack })
+          .then((response) => {
+            if (response.success) {
+              updateStatus(`✅ ${response.message}`, false);
+            } else {
+              updateStatus(`❌ ${response.message}`, true);
+            }
+          })
+          .catch((error) => {
+            updateStatus(`❌ Auto-screenshot error: ${error}`, true);
+          });
+      }
+
+      function updateAutoScreenshotFrames() {
+        const enabled = document.getElementById("autoScreenshotEnabled").checked;
+        const framesBack = parseInt(document.getElementById("autoScreenshotFramesBack").value) || 5;
+
+        // Only update if auto-screenshot is enabled
+        if (enabled) {
+          apiCall("/api/set_auto_screenshot", { enabled: enabled, frames_back: framesBack })
+            .then((response) => {
+              if (response.success) {
+                updateStatus(`✅ Frames back set to ${response.frames_back}`, false);
+              } else {
+                updateStatus(`❌ ${response.message}`, true);
+              }
+            })
+            .catch((error) => {
+              updateStatus(`❌ Update error: ${error}`, true);
             });
         }
       }
@@ -3044,6 +3112,16 @@
 
             // Update playback controls
             updatePlaybackUI(status);
+
+            // Update auto-screenshot controls
+            if (status.auto_screenshot_enabled !== undefined) {
+              document.getElementById("autoScreenshotEnabled").checked =
+                status.auto_screenshot_enabled;
+            }
+            if (status.auto_screenshot_frames_back !== undefined) {
+              document.getElementById("autoScreenshotFramesBack").value =
+                status.auto_screenshot_frames_back;
+            }
 
             // Enable save defaults button
             document.getElementById("saveDefaultsBtn").disabled = false;

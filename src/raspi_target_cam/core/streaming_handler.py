@@ -72,6 +72,12 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 models = self.camera_controller.list_yolo_models()
                 current_model = self.camera_controller.get_current_yolo_model()
                 self._send_json_response({'success': True, 'models': models, 'current_model': current_model})
+            elif path == '/api/auto_screenshot_status':
+                status = {
+                    'enabled': self.camera_controller.auto_screenshot_enabled,
+                    'frames_back': self.camera_controller.auto_screenshot_frames_back
+                }
+                self._send_json_response({'success': True, 'data': status})
             elif path.endswith('.html') or path.endswith('.css') or path.endswith('.js'):
                 self._serve_file(path[1:])  # Remove leading slash
             else:
@@ -746,6 +752,20 @@ class StreamingHandler(BaseHTTPRequestHandler):
             elif path == '/api/recording_status':
                 recording_status = self.camera_controller.get_recording_status()
                 response = {'success': True, 'data': recording_status}
+
+            elif path == '/api/set_auto_screenshot':
+                enabled = data.get('enabled', False)
+                frames_back = data.get('frames_back', 5)
+
+                self.camera_controller.auto_screenshot_enabled = enabled
+                self.camera_controller.auto_screenshot_frames_back = max(0, min(frames_back, 30))  # Clamp 0-30
+
+                response = {
+                    'success': True,
+                    'message': f'Auto-screenshot {"enabled" if enabled else "disabled"}',
+                    'enabled': enabled,
+                    'frames_back': self.camera_controller.auto_screenshot_frames_back
+                }
 
             self._send_json_response(response)
 
