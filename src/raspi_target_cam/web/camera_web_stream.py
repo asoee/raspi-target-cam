@@ -77,6 +77,7 @@ class CameraController:
         self.cap = None
         self.frame = None  # Processed frame (with overlays, transformations, etc.)
         self.raw_frame = None  # Raw frame without any processing (for calibration)
+        self.corrected_frame = None  # Perspective-corrected frame (no overlays, no zoom/pan)
         self.running = False
         self.lock = threading.Lock()
         self.switching_source = False  # Flag to indicate source switch in progress
@@ -548,9 +549,10 @@ class CameraController:
                     # Step 6: Add HUD overlay
                     display_frame = self._draw_hud_overlay(display_frame)
 
-                    # Update display frame (thread-safe)
+                    # Update frames (thread-safe)
                     with self.lock:
                         self.frame = display_frame.copy()  # Store display frame for streaming
+                        self.corrected_frame = corrected_frame.copy()  # Store corrected frame for screenshots
 
                     # Update playback position for video files
                     if self.source_type == "video":
@@ -1145,7 +1147,10 @@ class CameraController:
     def capture_image(self):
         """Capture and save current frame with camera controls metadata as EXIF tags"""
         with self.lock:
-            if self.frame is not None:
+            # Use corrected frame if available (no overlays, no zoom/pan), otherwise fall back to display frame
+            frame_to_save = self.corrected_frame if self.corrected_frame is not None else self.frame
+
+            if frame_to_save is not None:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"capture_{timestamp}.jpg"
                 filepath = os.path.join(self.captures_dir, filename)
@@ -1154,7 +1159,7 @@ class CameraController:
                 metadata = self._get_camera_controls_metadata()
 
                 # Save with OpenCV at 100% JPEG quality (lossless compression)
-                cv2.imwrite(filepath, self.frame, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                cv2.imwrite(filepath, frame_to_save, [cv2.IMWRITE_JPEG_QUALITY, 100])
 
                 # Embed metadata as EXIF
                 MetadataHandler.embed_image_metadata(filepath, metadata)
@@ -1391,7 +1396,18 @@ class CameraController:
         if self.source_type == "video":
             fps = self.video_fps
         else:
-            fps = 30.0
+            # For cameras, use actual camera FPS to avoid playback speed issues
+            if self.cap and self.cap.isOpened():
+                actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                if actual_fps > 0:
+                    fps = actual_fps
+                    print(f"Recording at camera FPS: {fps:.1f}")
+                else:
+                    fps = 30.0
+                    print(f"WARNING: Could not read camera FPS, using default: {fps}")
+            else:
+                fps = 30.0
+                print(f"WARNING: Camera not available, using default FPS: {fps}")
 
         # Clamp FPS to reasonable values
         fps = max(1.0, min(120.0, fps))
@@ -2279,6 +2295,7 @@ class CameraController:
             with self.lock:
                 self.frame = None
                 self.raw_frame = None
+                self.corrected_frame = None
 
             # Additional settling time for device cleanup
             print("DEBUG: Waiting for device cleanup...")
