@@ -92,6 +92,11 @@ class CameraController:
         self.auto_zoom_enabled = False  # Auto-zoom to target when detected
         self.rotation = 270  # degrees clockwise (270 = 90 anti-clockwise)
 
+        # Detection resolution (downscale for performance)
+        # Set to None to use full resolution, or specify (width, height) for faster detection
+        self.detection_resolution = (960, 720)  # ~7x faster than full 2592×1944
+        self.detection_scale_factor = 1.0  # Computed when downscaling
+
         # Capture settings
         self.captures_dir = "./data/captures"
         os.makedirs(self.captures_dir, exist_ok=True)
@@ -141,7 +146,9 @@ class CameraController:
         self.timing_stats = {
             "frame_acquisition": [],
             "transformations": [],
+            "detection_downscale": [],
             "target_detection": [],
+            "detection_upscale": [],
             "continuous_detection": [],
             "bullet_hole_overlays": [],
             "display_transformations": [],
@@ -574,7 +581,78 @@ class CameraController:
                     target_detected = False
                     if self.target_detector.detection_enabled:
                         detection_start = time.time()
-                        self.target_detector.detect_target(corrected_frame)
+
+                        # Downscale frame for faster detection if detection_resolution is set
+                        if self.detection_resolution is not None:
+                            downscale_start = time.time()
+                            h, w = corrected_frame.shape[:2]
+                            det_w, det_h = self.detection_resolution
+                            detection_frame = cv2.resize(corrected_frame, (det_w, det_h))
+                            self.timing_stats["detection_downscale"].append(time.time() - downscale_start)
+
+                            # Calculate scale factor for coordinate mapping
+                            self.detection_scale_factor = w / det_w  # or h / det_h (should be same ratio)
+
+                            # Log first time only
+                            if len(self.timing_stats["detection_downscale"]) == 1:
+                                print(f"DEBUG: Detection downscaling enabled: {w}×{h} → {det_w}×{det_h} (scale factor: {self.detection_scale_factor:.2f}×)")
+                        else:
+                            detection_frame = corrected_frame
+                            self.detection_scale_factor = 1.0
+
+                        # Run detection on downscaled frame
+                        detect_only_start = time.time()
+                        self.target_detector.detect_target(detection_frame)
+                        detect_only_time = time.time() - detect_only_start
+
+                        # Scale detection coordinates back to full resolution
+                        upscale_start = time.time()
+                        if self.detection_scale_factor != 1.0 and self.target_detector.target_center is not None:
+                            # Scale target center
+                            cx, cy = self.target_detector.target_center
+                            self.target_detector.target_center = (
+                                int(cx * self.detection_scale_factor),
+                                int(cy * self.detection_scale_factor)
+                            )
+
+                            # Scale target radius
+                            if self.target_detector.target_radius is not None:
+                                self.target_detector.target_radius = int(
+                                    self.target_detector.target_radius * self.detection_scale_factor
+                                )
+
+                            # Scale outer circle
+                            if self.target_detector.outer_circle is not None:
+                                ox, oy, oradius = self.target_detector.outer_circle
+                                self.target_detector.outer_circle = (
+                                    int(ox * self.detection_scale_factor),
+                                    int(oy * self.detection_scale_factor),
+                                    int(oradius * self.detection_scale_factor)
+                                )
+
+                            # Scale stable detection
+                            if self.target_detector.stable_detection is not None:
+                                sx, sy, sradius = self.target_detector.stable_detection
+                                self.target_detector.stable_detection = (
+                                    int(sx * self.detection_scale_factor),
+                                    int(sy * self.detection_scale_factor),
+                                    int(sradius * self.detection_scale_factor)
+                                )
+
+                            # Scale stable outer circle
+                            if self.target_detector.stable_outer_circle is not None:
+                                sox, soy, soradius = self.target_detector.stable_outer_circle
+                                self.target_detector.stable_outer_circle = (
+                                    int(sox * self.detection_scale_factor),
+                                    int(soy * self.detection_scale_factor),
+                                    int(soradius * self.detection_scale_factor)
+                                )
+
+                        # Record upscale timing
+                        if self.detection_scale_factor != 1.0:
+                            self.timing_stats["detection_upscale"].append(time.time() - upscale_start)
+
+                        # Record total detection time (includes downscale + detect + upscale)
                         self.timing_stats["target_detection"].append(time.time() - detection_start)
                         # Check if target is detected (even if not stable yet)
                         target_detected = self.target_detector.target_center is not None
