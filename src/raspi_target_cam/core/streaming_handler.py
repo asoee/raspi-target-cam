@@ -44,6 +44,8 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 self._serve_corrected_stream()
             elif path == '/' or path == '/index.html':
                 self._serve_file('camera_interface.html')
+            elif path == '/kiosk' or path == '/kiosk.html':
+                self._serve_file('kiosk.html')
             elif path == '/perspective' or path == '/perspective.html':
                 self._serve_file('perspective_adjustment.html')
             elif path == '/api/status':

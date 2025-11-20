@@ -216,6 +216,8 @@ data/test_frames/
 data/scoring_sessions/
 data/presets/
 
+defaults.json
+
 # Test outputs
 /test_outputs/
 

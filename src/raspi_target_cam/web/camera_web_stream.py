@@ -42,6 +42,7 @@ def crash_handler(signum, frame):
 signal.signal(signal.SIGSEGV, crash_handler)
 
 import cv2
+import numpy as np
 import threading
 import time
 import json
@@ -136,12 +137,31 @@ class CameraController:
         self.processing_thread = None
         self.thread_id_counter = 0  # For logging unique thread IDs
 
+        # Performance timing statistics
+        self.timing_stats = {
+            "frame_acquisition": [],
+            "transformations": [],
+            "target_detection": [],
+            "continuous_detection": [],
+            "bullet_hole_overlays": [],
+            "display_transformations": [],
+            "hud_overlay": [],
+            "frame_update": [],
+            "total_loop": []
+        }
+        self.last_stats_output = time.time()
+        self.stats_output_interval = 30.0  # Output stats every 30 seconds
+
         # Target detection
         self.target_detector = TargetDetector()
 
         # Perspective correction for main stream
         self.perspective = Perspective()  # Own perspective correction instance
         self.perspective_correction_enabled = True
+
+        # Combined transformation matrix (rotation + perspective) for optimization
+        self.combined_transform_matrix = None
+        self.cached_rotation = None  # Track rotation used in combined matrix
 
         # Test frame generation
         self.test_frame_counter = 0
@@ -474,6 +494,36 @@ class CameraController:
             print(f"Failed to initialize capture: {e}")
             return False
 
+    def _output_timing_statistics(self):
+        """Output timing statistics for the processing loop"""
+        print("\n" + "="*60)
+        print("PERFORMANCE STATISTICS (last 30 seconds)")
+        print("="*60)
+
+        for step_name, timings in self.timing_stats.items():
+            if not timings:
+                continue
+
+            avg_time = sum(timings) / len(timings) * 1000  # Convert to milliseconds
+            min_time = min(timings) * 1000
+            max_time = max(timings) * 1000
+            count = len(timings)
+
+            print(f"{step_name:25s}: avg={avg_time:6.2f}ms  min={min_time:6.2f}ms  max={max_time:6.2f}ms  count={count:4d}")
+
+        # Calculate FPS from total loop time
+        total_loop_timings = self.timing_stats.get("total_loop", [])
+        if total_loop_timings:
+            avg_loop_time = sum(total_loop_timings) / len(total_loop_timings)
+            fps = 1.0 / avg_loop_time if avg_loop_time > 0 else 0
+            print(f"\nProcessing FPS: {fps:.2f}")
+
+        print("="*60 + "\n")
+
+        # Clear statistics for next interval
+        for key in self.timing_stats:
+            self.timing_stats[key] = []
+
     def _processing_loop(self, thread_id):
         """Processing loop for transformations, perspective correction, and detection
 
@@ -486,7 +536,10 @@ class CameraController:
 
         while self.running:
             try:
+                loop_start_time = time.time()
+
                 # Get latest frame with playback position from capture system
+                frame_acq_start = time.time()
                 if self.capture_system:
                     raw_frame, position = self.capture_system.get_latest_frame()
                 else:
@@ -494,6 +547,7 @@ class CameraController:
                         None,
                         {"current_frame": 0, "total_frames": 0, "source_type": "unknown", "change_counter": 0},
                     )
+                self.timing_stats["frame_acquisition"].append(time.time() - frame_acq_start)
 
                 if raw_frame is not None:
                     change_counter = position.get("change_counter", 0)
@@ -511,13 +565,17 @@ class CameraController:
 
                     # Step 1: Apply pre-detection transformations (rotation + perspective correction)
                     # Note: _apply_transformations stores the rotated frame as self.raw_frame
+                    transform_start = time.time()
                     corrected_frame = self._apply_transformations(raw_frame)
+                    self.timing_stats["transformations"].append(time.time() - transform_start)
 
                     # Step 2: Run target detection (circle detection) if enabled
                     # This detects the target itself and determines target type (pistol/rifle)
                     target_detected = False
                     if self.target_detector.detection_enabled:
+                        detection_start = time.time()
                         self.target_detector.detect_target(corrected_frame)
+                        self.timing_stats["target_detection"].append(time.time() - detection_start)
                         # Check if target is detected (even if not stable yet)
                         target_detected = self.target_detector.target_center is not None
 
@@ -544,22 +602,31 @@ class CameraController:
                         # Check if we should run detection on this frame
                         if self.frame_count > self.detection_interval:
                             self.frame_count = 0
+                            cont_det_start = time.time()
                             self._run_continuous_detection(corrected_frame)
+                            self.timing_stats["continuous_detection"].append(time.time() - cont_det_start)
 
                     # Step 4: Add bullet hole overlays (on corrected frame, before zoom/pan)
                     display_frame = corrected_frame
                     if self.bullet_holes:
+                        overlay_start = time.time()
                         display_frame = self.bullet_hole_detector.draw_bullet_hole_overlays(
                             corrected_frame, self.bullet_holes
                         )
+                        self.timing_stats["bullet_hole_overlays"].append(time.time() - overlay_start)
 
                     # Step 5: Apply display transformations (zoom/pan) for UI
+                    disp_trans_start = time.time()
                     display_frame = self._apply_display_transformations(display_frame)
+                    self.timing_stats["display_transformations"].append(time.time() - disp_trans_start)
 
                     # Step 6: Add HUD overlay
+                    hud_start = time.time()
                     display_frame = self._draw_hud_overlay(display_frame)
+                    self.timing_stats["hud_overlay"].append(time.time() - hud_start)
 
                     # Update frames (thread-safe)
+                    frame_update_start = time.time()
                     with self.lock:
                         self.frame = display_frame.copy()  # Store display frame for streaming
                         self.corrected_frame = corrected_frame.copy()  # Store corrected frame for screenshots
@@ -568,6 +635,7 @@ class CameraController:
                         self.corrected_frame_buffer.append(corrected_frame.copy())
                         if len(self.corrected_frame_buffer) > self.corrected_frame_buffer_size:
                             self.corrected_frame_buffer.pop(0)  # Remove oldest frame
+                    self.timing_stats["frame_update"].append(time.time() - frame_update_start)
 
                     # Update playback position for video files
                     if self.source_type == "video":
@@ -575,6 +643,14 @@ class CameraController:
                         self.total_frames = position["total_frames"]
                         if not self.paused:
                             self.display_frame_number = self.current_frame_number
+
+                    # Record total loop time
+                    self.timing_stats["total_loop"].append(time.time() - loop_start_time)
+
+                    # Output statistics every 30 seconds
+                    if time.time() - self.last_stats_output >= self.stats_output_interval:
+                        self._output_timing_statistics()
+                        self.last_stats_output = time.time()
 
                 # Sleep briefly to avoid busy-waiting (~100 FPS max processing rate)
                 time.sleep(0.01)
@@ -588,8 +664,79 @@ class CameraController:
 
         print(f"DEBUG: Processing loop {thread_id} stopped")
 
+    def _compute_combined_transform(self, frame_shape):
+        """Compute combined rotation + perspective transformation matrix
+
+        This combines both transformations into a single matrix operation for better performance.
+
+        Args:
+            frame_shape: Shape of input frame (height, width)
+
+        Returns:
+            Combined 3x3 perspective transformation matrix, or None if no transforms needed
+        """
+        h, w = frame_shape[:2]
+
+        # Start with identity matrix
+        combined_matrix = np.eye(3, dtype=np.float32)
+
+        # Add rotation transformation if needed
+        if self.rotation != 0:
+            # For 90/180/270 degree rotations, we need to compute the transformation matrix
+            # that represents the rotation
+            if self.rotation == 90:
+                # 90 degrees clockwise: swap axes and flip horizontally
+                # New width = old height, new height = old width
+                rotation_matrix = np.array([
+                    [0, -1, h],  # x' = -y + h
+                    [1, 0, 0],   # y' = x
+                    [0, 0, 1]
+                ], dtype=np.float32)
+            elif self.rotation == 180:
+                # 180 degrees: flip both axes
+                rotation_matrix = np.array([
+                    [-1, 0, w],  # x' = -x + w
+                    [0, -1, h],  # y' = -y + h
+                    [0, 0, 1]
+                ], dtype=np.float32)
+            elif self.rotation == 270:
+                # 270 degrees clockwise (90 counter-clockwise): swap axes and flip vertically
+                # New width = old height, new height = old width
+                rotation_matrix = np.array([
+                    [0, 1, 0],   # x' = y
+                    [-1, 0, w],  # y' = -x + w
+                    [0, 0, 1]
+                ], dtype=np.float32)
+            else:
+                # For arbitrary angles, use getRotationMatrix2D and convert to 3x3
+                center = (w // 2, h // 2)
+                rotation_matrix_2x3 = cv2.getRotationMatrix2D(center, -self.rotation, 1.0)
+                rotation_matrix = np.vstack([rotation_matrix_2x3, [0, 0, 1]])
+
+            combined_matrix = rotation_matrix @ combined_matrix
+
+        # Add perspective correction if enabled
+        if self.perspective_correction_enabled and self.perspective.saved_perspective_matrix is not None:
+            perspective_matrix = self.perspective.saved_perspective_matrix
+
+            # Convert to 3x3 if it's 2x3 (affine)
+            if perspective_matrix.shape == (2, 3):
+                perspective_matrix = np.vstack([perspective_matrix, [0, 0, 1]])
+
+            # Combine with rotation: perspective * rotation (apply rotation first, then perspective)
+            combined_matrix = perspective_matrix @ combined_matrix
+
+        # Return None if this is just identity (no transforms)
+        if np.allclose(combined_matrix, np.eye(3)):
+            return None
+
+        return combined_matrix
+
     def _apply_transformations(self, frame):
         """Apply rotation and perspective correction (pre-detection transformations)
+
+        This method uses a combined transformation matrix when both rotation and perspective
+        correction are enabled for better performance (single warp instead of two).
 
         Args:
             frame: Input frame
@@ -597,6 +744,41 @@ class CameraController:
         Returns:
             Transformed frame ready for detection (rotation + perspective correction applied)
         """
+        h, w = frame.shape[:2]
+
+        # Check if we can use combined transformation (both rotation and perspective enabled)
+        use_combined = (
+            self.rotation != 0
+            and self.perspective_correction_enabled
+            and self.perspective.saved_perspective_matrix is not None
+        )
+
+        if use_combined:
+            # Use combined transformation for better performance
+            # Update combined matrix if rotation or perspective has changed
+            if (self.combined_transform_matrix is None
+                or self.cached_rotation != self.rotation):
+                self.combined_transform_matrix = self._compute_combined_transform(frame.shape)
+                self.cached_rotation = self.rotation
+                print(f"DEBUG: Using combined transformation (rotation={self.rotation}, perspective=enabled)")
+
+            # Apply combined transformation in one step
+            if self.combined_transform_matrix is not None:
+                # Determine output size based on rotation
+                if self.rotation in [90, 270]:
+                    output_size = (h, w)  # Swap dimensions for 90/270 rotation
+                else:
+                    output_size = (w, h)
+
+                frame = cv2.warpPerspective(frame, self.combined_transform_matrix, output_size)
+
+                # Store as raw frame for calibration (includes rotation but no overlays)
+                with self.lock:
+                    self.raw_frame = frame.copy()
+
+                return frame
+
+        # Fallback to separate transformations if combined not applicable
         # Apply rotation first
         if self.rotation != 0:
             frame = self._rotate_frame(frame, self.rotation)
