@@ -418,6 +418,39 @@ class CameraController:
                             self.cached_camera_controls = {"available": False, "controls": {}}
                             print(f"DEBUG: No cached controls available for camera {self.camera_index}")
 
+                        # Apply default preset now, while we have exclusive access to the cap
+                        # (before ThreadedCaptureSystem takes over)
+                        preset_file = "./data/presets/default.json"
+                        if os.path.exists(preset_file) and self.cached_camera_controls.get("available"):
+                            try:
+                                with open(preset_file, "r") as f:
+                                    preset = json.load(f)
+                                control_mapping = {
+                                    "brightness": cv2.CAP_PROP_BRIGHTNESS,
+                                    "contrast": cv2.CAP_PROP_CONTRAST,
+                                    "saturation": cv2.CAP_PROP_SATURATION,
+                                    "hue": cv2.CAP_PROP_HUE,
+                                    "gain": cv2.CAP_PROP_GAIN,
+                                    "gamma": cv2.CAP_PROP_GAMMA,
+                                    "exposure": cv2.CAP_PROP_EXPOSURE,
+                                    "auto_exposure": cv2.CAP_PROP_AUTO_EXPOSURE,
+                                    "auto_wb": cv2.CAP_PROP_AUTO_WB,
+                                    "backlight": cv2.CAP_PROP_BACKLIGHT,
+                                    "sharpness": cv2.CAP_PROP_SHARPNESS,
+                                    "temperature": cv2.CAP_PROP_TEMPERATURE,
+                                    "wb_temperature": cv2.CAP_PROP_WB_TEMPERATURE,
+                                }
+                                applied = 0
+                                for name, value in preset.items():
+                                    if name in control_mapping:
+                                        if self.cap.set(control_mapping[name], float(value)):
+                                            applied += 1
+                                            if name in self.cached_camera_controls["controls"]:
+                                                self.cached_camera_controls["controls"][name]["current"] = value
+                                print(f"✅ Applied default preset at startup: {applied}/{len([k for k in preset if k in control_mapping])} controls")
+                            except Exception as e:
+                                print(f"WARNING: Could not apply default preset: {e}")
+
                     except Exception as e:
                         print(f"WARNING: Could not load cached camera controls: {e}")
                         self.cached_camera_controls = {"available": False, "controls": {}}
@@ -1799,7 +1832,13 @@ class CameraController:
         if name not in self.cached_camera_controls.get("controls", {}):
             return False, f"Control '{name}' not available"
 
-        if not self.cap or not self.cap.isOpened():
+        # Try to get cap from threaded capture system if available
+        cap = self.cap
+        if not cap or not cap.isOpened():
+            if hasattr(self, 'capture_system') and self.capture_system and hasattr(self.capture_system, 'cap'):
+                cap = self.capture_system.cap
+
+        if not cap or not cap.isOpened():
             return False, "Camera not available for control changes"
 
         try:
@@ -1832,13 +1871,13 @@ class CameraController:
                 if value < min_val or value > max_val:
                     return False, f"Value {value} out of range for {name} (valid: {min_val} to {max_val})"
 
-            # Set the control using the existing camera instance
+            # Set the control using the camera instance
             prop_id = control_mapping[name]
-            success = self.cap.set(prop_id, float(value))
+            success = cap.set(prop_id, float(value))
 
             if success:
                 # Verify the value was set correctly
-                actual_value = self.cap.get(prop_id)
+                actual_value = cap.get(prop_id)
 
                 # Update cached value
                 self.cached_camera_controls["controls"][name]["current"] = actual_value
@@ -1964,10 +2003,21 @@ class CameraController:
     def load_camera_preset(self, preset_name):
         """Load camera control settings from a preset using existing camera instance"""
         if not self.cached_camera_controls.get("available"):
-            return False, "Camera controls not available"
+            return False, "Camera controls not cached"
 
-        if not self.cap or not self.cap.isOpened():
-            return False, "Camera not available for preset loading"
+        # Try to get cap from threaded capture system if available
+        cap = self.cap
+        cap_source = "self.cap"
+        if not cap or not cap.isOpened():
+            if hasattr(self, 'capture_system') and self.capture_system and hasattr(self.capture_system, 'cap'):
+                cap = self.capture_system.cap
+                cap_source = "capture_system.cap"
+
+        if not cap:
+            return False, f"No cap device available (self.cap={self.cap}, has capture_system={hasattr(self, 'capture_system')})"
+
+        if not cap.isOpened():
+            return False, f"Camera cap device not opened (source: {cap_source})"
 
         try:
             preset_file = f"./data/presets/{preset_name}.json"
@@ -2070,11 +2120,19 @@ class CameraController:
                 if source_type == "camera" and defaults.get("camera_index") is not None:
                     camera_index = defaults["camera_index"]
                     if self.source_type != "camera" or self.camera_index != camera_index:
-                        print(f"  Switching to camera {camera_index}")
-                        # Format: set_video_source expects string camera index
-                        success, message = self.set_video_source("camera", str(camera_index))
-                        if not success:
-                            print(f"  WARNING: Failed to switch to camera: {message}")
+                        # Defer camera switch to background thread - camera device needs time to
+                        # settle after the detection phase (rapid open/close in __init__).
+                        # Manual switching works because enough time has passed; we replicate that here.
+                        print(f"  Scheduling camera {camera_index} switch after detection settles...")
+                        def _delayed_camera_switch(idx):
+                            time.sleep(3.0)
+                            print(f"  Switching to camera {idx}...")
+                            success, message = self.set_video_source("camera", str(idx))
+                            if success:
+                                print(f"  ✅ Switched to camera {idx}")
+                            else:
+                                print(f"  WARNING: Failed to switch to camera: {message}")
+                        threading.Thread(target=_delayed_camera_switch, args=(camera_index,), daemon=True, name="CameraSwitch").start()
                 elif source_type == "video" and defaults.get("video_file"):
                     video_file = defaults["video_file"]
                     if self.source_type != "video" or self.video_file != video_file:
@@ -2569,7 +2627,11 @@ class CameraController:
 
             # For camera switching, use a safer approach that avoids OpenCV crashes
             if source_type == "camera":
-                camera_index = int(source_id.split("_")[1])
+                # Handle both "camera_0" format and plain "0" format
+                if "_" in source_id:
+                    camera_index = int(source_id.split("_")[1])
+                else:
+                    camera_index = int(source_id)
 
                 # Test the camera first before switching
                 print(f"DEBUG: Testing camera {camera_index}...")
@@ -2623,7 +2685,11 @@ class CameraController:
 
             # Configure new source
             if source_type == "camera":
-                camera_index = int(source_id.split("_")[1])
+                # Handle both "camera_0" format and plain "0" format
+                if "_" in source_id:
+                    camera_index = int(source_id.split("_")[1])
+                else:
+                    camera_index = int(source_id)
                 self.camera_index = camera_index
                 self.source_type = "camera"
                 self.video_file = None
@@ -2858,6 +2924,7 @@ def main():
         else:
             print("✅ Camera already running (started by defaults)")
             print(f"   Source: {camera_controller.source_type}")
+
 
         # Start unified HTTP server
         print("DEBUG: Creating HTTP server...")

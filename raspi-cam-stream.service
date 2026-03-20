@@ -1,0 +1,19 @@
+[Unit]
+Description=Raspberry Pi Camera Streaming Service
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/raspi-target-cam
+ExecStart=/home/pi/.local/bin/uv run raspi-cam-stream
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Environment variables (if needed)
+Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=multi-user.target

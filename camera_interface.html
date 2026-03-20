@@ -3333,6 +3333,18 @@
         }
 
         // Update camera controls if available and changed
+        // Check if camera controls just became available (transition from unavailable to available)
+        const controlsJustBecameAvailable =
+          status.camera_controls &&
+          status.camera_controls.available &&
+          (!lastStatus.camera_controls || !lastStatus.camera_controls.available);
+
+        if (controlsJustBecameAvailable) {
+          console.log("Camera controls just became available - updating UI");
+          updateCameraControlsUI(status.camera_controls);
+          hasChanges = true;
+        }
+
         if (status.camera_controls && status.camera_controls.available) {
           Object.keys(status.camera_controls.controls).forEach(
             (controlName) => {
